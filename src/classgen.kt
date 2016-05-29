@@ -14,6 +14,8 @@ object ClassGen {
 		val ALLOCA = MethodRef(LlvmRuntime::class.java.name, LlvmRuntime::alloca.name, "(I)I")
 		val LI32 = MethodRef(LlvmRuntime::class.java.name, LlvmRuntime::li32.name, "(I)I")
 		val SI32 = MethodRef(LlvmRuntime::class.java.name, LlvmRuntime::si32.name, "(II)V")
+		val SP = FieldRef(LlvmRuntime::class.java.name, LlvmRuntime::SP.name, "I")
+		val LocalSP = LOCAL("%SP")
 
 		lateinit var program: Program
 		lateinit var cw: ClassWriter
@@ -71,6 +73,9 @@ object ClassGen {
 
 			for (arg in decl.args) getLocalId(arg.name)
 
+			mv.GETSTATIC(SP)
+			_store(Type.INT32, LocalSP)
+
 			super.visit(decl)
 
 			mv.visitMaxs(maxStackCount, localCount)
@@ -89,9 +94,7 @@ object ClassGen {
 			val value = typedValue.value
 			when (value) {
 				is INT -> mv.INT(value.value)
-				is LOCAL -> {
-					mv.visitVarInsn(Opcodes.ILOAD, getLocalId(value))
-				}
+				is LOCAL -> _load(typedValue.type, value)
 				else -> noImpl("value: $value")
 			}
 		}
@@ -122,8 +125,17 @@ object ClassGen {
 
 		fun _store(type: Type, local: LOCAL) {
 			when (type) {
-				Type.INT32 -> {
+				Type.INT32, is Type.PTR -> {
 					mv.visitVarInsn(Opcodes.ISTORE, getLocalId(local))
+				}
+				else -> noImpl("${type}")
+			}
+		}
+
+		fun _load(type: Type, local: LOCAL) {
+			when (type) {
+				Type.INT32, is Type.PTR -> {
+					mv.visitVarInsn(Opcodes.ILOAD, getLocalId(local))
 				}
 				else -> noImpl("${type}")
 			}
@@ -141,6 +153,10 @@ object ClassGen {
 		}
 
 		override fun visit(stm: Stm.RET) {
+
+			_load(Type.INT32, LocalSP)
+			mv.PUTSTATIC(SP)
+
 			//println("ret!")
 			visit(stm.typedValue)
 			mv.vreturn(this.function.type)
@@ -149,6 +165,7 @@ object ClassGen {
 }
 
 class MethodRef(val owner: String, val name:String, val desc:String)
+class FieldRef(val owner: String, val name:String, val desc:String)
 
 fun MethodVisitor.ADD(type: Type) {
 	when (type) {
@@ -160,6 +177,13 @@ fun MethodVisitor.ADD(type: Type) {
 inline fun <reified T: Any> MethodVisitor.NEWARRAY() {
 	NEWARRAY(T::class.java)
 }
+
+private fun MethodVisitor._FIELD(opcode:Int, field: FieldRef) {
+	visitFieldInsn(opcode, field.owner, field.name, field.desc)
+}
+
+fun MethodVisitor.GETSTATIC(field: FieldRef) = _FIELD(Opcodes.GETSTATIC, field)
+fun MethodVisitor.PUTSTATIC(field: FieldRef) = _FIELD(Opcodes.PUTSTATIC, field)
 
 fun MethodVisitor.INVOKESTATIC(method: MethodRef) {
 	visitMethodInsn(Opcodes.INVOKESTATIC, method.owner, method.name, method.desc, false)

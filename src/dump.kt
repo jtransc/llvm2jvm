@@ -36,8 +36,8 @@ fun Stm.dump() {
 		is Stm.LOAD -> {
 			println("  ${this.target.dump()} = load ${this.targetType.dump()}, ${this.from.dump()}")
 		}
-		is Stm.ADD -> {
-			println("  ${this.target.dump()} = add ${this.type.dump()} ${this.left.dump()}, ${this.right.dump()}")
+		is Stm.BINOP -> {
+			println("  ${this.target.dump()} = ${this.op} ${this.type.dump()} ${this.left.dump()}, ${this.right.dump()}")
 		}
 		is Stm.RET -> {
 			println("  ret ${this.typedValue.dump()}")

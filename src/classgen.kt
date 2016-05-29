@@ -116,10 +116,16 @@ object ClassGen {
 			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target as LOCAL))
 		}
 
-		override fun visit(stm: Stm.ADD) {
+		override fun visit(stm: Stm.BINOP) {
 			visit(stm.typedLeft)
 			visit(stm.typedRight)
-			mv.ADD(stm.type)
+			when (stm.op) {
+				"add" -> mv.ADD(stm.type)
+				"sub" -> mv.SUB(stm.type)
+				"mul" -> mv.MUL(stm.type)
+				"sdiv" -> mv.DIV(stm.type)
+				else -> noImpl("Unsupported op ${stm.op}")
+			}
 			_store(stm.type, stm.target)
 		}
 
@@ -167,11 +173,24 @@ object ClassGen {
 class MethodRef(val owner: String, val name:String, val desc:String)
 class FieldRef(val owner: String, val name:String, val desc:String)
 
-fun MethodVisitor.ADD(type: Type) {
-	when (type) {
-		Type.INT32 -> this.visitInsn(Opcodes.IADD)
-		else -> noImpl("${type}")
-	}
+fun MethodVisitor.ADD(type: Type) = when (type) {
+	Type.INT32 -> this.visitInsn(Opcodes.IADD)
+	else -> noImpl("${type}")
+}
+
+fun MethodVisitor.SUB(type: Type) = when (type) {
+	Type.INT32 -> this.visitInsn(Opcodes.ISUB)
+	else -> noImpl("${type}")
+}
+
+fun MethodVisitor.MUL(type: Type) = when (type) {
+	Type.INT32 -> this.visitInsn(Opcodes.IMUL)
+	else -> noImpl("${type}")
+}
+
+fun MethodVisitor.DIV(type: Type) = when (type) {
+	Type.INT32 -> this.visitInsn(Opcodes.IDIV)
+	else -> noImpl("${type}")
 }
 
 inline fun <reified T: Any> MethodVisitor.NEWARRAY() {
@@ -198,9 +217,18 @@ fun MethodVisitor.NEWARRAY(type: Class<*>) {
 
 fun MethodVisitor.INT(value: Int) {
 	when (value) {
+		-1 -> visitInsn(ICONST_M1)
 		0 -> visitInsn(ICONST_0)
 		1 -> visitInsn(ICONST_1)
-		else -> visitLdcInsn(value)
+		2 -> visitInsn(ICONST_2)
+		3 -> visitInsn(ICONST_3)
+		4 -> visitInsn(ICONST_4)
+		5 -> visitInsn(ICONST_5)
+		in Byte.MIN_VALUE .. Byte.MAX_VALUE -> visitIntInsn(Opcodes.BIPUSH, value)
+		in Short.MIN_VALUE .. Short.MAX_VALUE -> visitIntInsn(Opcodes.SIPUSH, value)
+		else -> {
+			visitLdcInsn(value)
+		}
 	}
 }
 

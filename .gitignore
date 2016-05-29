@@ -4,3 +4,5 @@ target
 *.ipr
 *.iws
 *.class
+temp.c
+temp.ll

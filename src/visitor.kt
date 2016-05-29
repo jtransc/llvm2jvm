@@ -47,7 +47,7 @@ open class ProgramVisitor {
 
 	open fun visit(stm: Stm) {
 		when (stm) {
-			is Stm.ADD -> visit(stm)
+			is Stm.BINOP -> visit(stm)
 			is Stm.ALLOCA -> visit(stm)
 			is Stm.CALL -> visit(stm)
 			is Stm.LOAD -> visit(stm)
@@ -57,7 +57,7 @@ open class ProgramVisitor {
 		}
 	}
 
-	open fun visit(stm: Stm.ADD) {
+	open fun visit(stm: Stm.BINOP) {
 		visit(stm.target)
 		visit(stm.left)
 		visit(stm.right)

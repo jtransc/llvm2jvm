@@ -48,7 +48,12 @@ fun TokenReader<String>.readValue(): Value {
 	if (peek() in setOf("%", "@")) {
 		return readReference()
 	} else {
-		return INT(this.read().toInt())
+		val p = this.read()
+		if (p == "-") {
+			return INT(-this.read().toInt())
+		} else {
+			return INT(p.toInt())
+		}
 	}
 }
 
@@ -187,7 +192,7 @@ class TypedValue(val type: Type, val value: Value)
 interface Stm {
 	class ALLOCA(val target: LOCAL, val type: Type) : Stm
 	class LOAD(val target: LOCAL, val targetType: Type, val from: TypedValue) : Stm
-	class ADD(val target: LOCAL, val type: Type, val left: Value, val right: Value) : Stm {
+	class BINOP(val target: LOCAL, val op: String, val type: Type, val left: Value, val right: Value) : Stm {
 		val typedLeft = TypedValue(type, left)
 		val typedRight = TypedValue(type, right)
 	}
@@ -218,14 +223,14 @@ fun TokenReader<String>.readDefinition(): Stm {
 					tryReadExtra()
 					return Stm.LOAD(target, type1, from)
 				}
-				"add" -> {
+				"add", "sub", "mul", "sdiv" -> {
 					tryRead("nsw")
 					val type = readType()
 					val src = readValue()
 					expect(",")
 					val dst = readValue()
 					tryReadExtra()
-					return Stm.ADD(target, type, src, dst)
+					return Stm.BINOP(target, op, type, src, dst)
 				}
 				"call" -> {
 					val rettype = readType()
@@ -258,7 +263,7 @@ fun TokenReader<String>.readDefinition(): Stm {
 fun StrReader.tokenize(): List<String> {
 	val out = arrayListOf<String>()
 	while (this.hasMore) {
-		val result = readToken()
+		val result = readToken() ?: break
 		out += result
 	}
 	return out
@@ -269,16 +274,16 @@ val ops = setOf(
 	"*", "-", "+"
 )
 
-fun StrReader.readToken(): String {
+fun StrReader.readToken(): String? {
 	// skip spaces
-	mainloop@while (true) {
+	mainloop@while (hasMore) {
 		readWhile { it.isWhitespace() }
 		if (peek(3) in ops) return read(3)
 		if (peek(2) in ops) return read(2)
 		if (peek(1) in ops) return read(1)
 		val ch = peekch()
-		return when (ch) {
-			';' -> {
+		when (ch) {
+			';', '!' -> {
 				this.readUntil('\n')
 				continue@mainloop
 			}
@@ -291,10 +296,15 @@ fun StrReader.readToken(): String {
 			in 'a'..'z', in 'A'..'Z', in '0'..'9', '_' -> {
 				return readWhile { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' }!!
 			}
+			'\u0000' -> {
+				readch()
+				continue@mainloop
+			}
 			else -> {
-				//invalidOp("Unknown character '$ch'")
-				return "$ch"
+				invalidOp("Unknown character '$ch'")
+				//return "$ch"
 			}
 		}
 	}
+	return null
 }

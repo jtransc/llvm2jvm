@@ -1,5 +1,7 @@
 import com.jtransc.text.StrReader
 import com.jtransc.text.TokenReader
+import com.jtransc.vfs.CwdVfs
+import com.jtransc.vfs.SyncVfs
 import org.junit.Assert
 import org.junit.Test
 import java.io.File
@@ -45,5 +47,48 @@ class Test123 {
 		//println(clazz)
 
 		Assert.assertEquals(10, clazz.getMethod("main").invoke(null))
+	}
+
+	@Test fun test2() {
+		Assert.assertEquals(9, runCppProgram("""
+			int sum(int a, int b, int c) {
+				return a + b + c;
+			}
+
+			int main() {
+				return 3 + sum(1, 2, 3);
+			}
+		""", optimizations = false))
+	}
+
+	@Test fun test3() {
+		Assert.assertEquals(9, runCppProgram("""
+			int mul(int a, int b, int c) { return a * b * c; }
+			int main() { return 3 + mul(1, 2, 3); }
+		""", optimizations = false))
+	}
+
+	@Test fun test4() {
+		Assert.assertEquals(15, runCppProgram("""
+			int mul(int a, int b, int c, int d, int e) { return a + b * c - d / e; }
+			int main() { return 3 + mul(1, 2, 3, -10, 2); }
+		""", optimizations = false))
+	}
+
+	private fun runCppProgram(cppCode: String, optimizations: Boolean): Any? {
+		val llCode = compileCppProgram(cppCode, optimizations)
+		val tokens = StrReader(llCode).tokenize()
+		//val tokens = GenericTokenize(StringReader(ll))
+		val program = TokenReader(tokens).parse("Hello")
+		val clazzBa = ClassGen.generate(program)
+		val clazz = getClassFromByteArray(program.className, clazzBa)
+		return clazz.getMethod("main").invoke(null)
+	}
+
+	private fun compileCppProgram(code: String, optimizations: Boolean): String {
+		val cwd = CwdVfs()
+		cwd["temp.c"] = code
+		cwd.exec("clang", if (optimizations) "-O3" else "-O0", "-S", "-emit-llvm", "temp.c")
+		return cwd["temp.ll"].readString()
 	}
 }

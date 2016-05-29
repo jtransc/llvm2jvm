@@ -10,7 +10,7 @@ fun Program.dump() {
 fun Decl.dump() {
 	when (this) {
 		Decl.EMPTY -> println("// Decl.EMPTY")
-		is Decl.DEFINE -> {
+		is Decl.DECFUN -> {
 			println(this.type.dump() + " " + this.name.dump() + "(" + this.args.map { it.dump() }.joinToString(", ") + ") {")
 			this.body.dump()
 			println("}")
@@ -40,7 +40,7 @@ fun Stm.dump() {
 			println("  ${this.target.dump()} = add ${this.type.dump()} ${this.left.dump()}, ${this.right.dump()}")
 		}
 		is Stm.RET -> {
-			println("  ret ${this.type.dump()} ${this.ref.dump()}")
+			println("  ret ${this.typedValue.dump()}")
 		}
 		is Stm.CALL -> {
 			println("  ${this.target.dump()} = call ${this.rettype.dump()} ${this.name.dump()}(" + this.args.map { it.dump() }.joinToString(", ") + ")")
@@ -65,7 +65,7 @@ fun Reference.dump(): String = when (this) {
 
 fun Value.dump(): String = when (this) {
 	is Reference -> this.dump()
-	is INT -> this.value
+	is INT -> "${this.value}"
 	else -> "$this"
 }
 

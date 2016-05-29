@@ -1,15 +1,16 @@
 import com.jtransc.error.invalidOp
+import com.jtransc.error.noImpl
 import com.jtransc.text.StrReader
 import com.jtransc.text.TokenReader
 import com.jtransc.text.readUntil
 import com.jtransc.text.readWhile
 
-class Program(val decls: List<Decl>)
+class Program(val className:String, val decls: List<Decl>)
 
-fun TokenReader<String>.parse() = Program(parseToplevelList())
+fun TokenReader<String>.parse(className:String) = Program(className, parseToplevelList())
 
 fun TokenReader<String>.readArgument(): Argument {
-	return Argument(readType(), readReference())
+	return Argument(readType(), readReference() as LOCAL)
 }
 
 fun TokenReader<String>.readBasicType(): Type.Basic {
@@ -47,7 +48,7 @@ fun TokenReader<String>.readValue(): Value {
 	if (peek() in setOf("%", "@")) {
 		return readReference()
 	} else {
-		return INT(this.read())
+		return INT(this.read().toInt())
 	}
 }
 
@@ -100,7 +101,7 @@ fun TokenReader<String>.parseToplevel(): Decl {
 
 			expect("}")
 
-			return Decl.DEFINE(type, name, args, body)
+			return Decl.DECFUN(type, name, args, body)
 		}
 		"attributes" -> {
 			expect("attributes")
@@ -139,23 +140,44 @@ fun TokenReader<String>.readDefinitions(): Body {
 
 interface Type {
 	interface Basic : Type
-	class INT(val width: Int) : Basic
-	class PTR(val type: Type) : Type
+	object VOID : Basic
+	data class INT(val width: Int) : Basic
+	data class PTR(val type: Type) : Type
+	companion object {
+		val INT8 = INT(8)
+		val INT16 = INT(16)
+		val INT32 = INT(32)
+		val INT64 = INT(64)
+	}
+}
+
+fun Type.toJavaType(): String {
+	return when (this) {
+		is Type.INT -> {
+			when (this.width) {
+				32 -> "I"
+				else -> noImpl("Int width: $width")
+			}
+		}
+		else -> noImpl("type: $this")
+	}
 }
 
 interface Value
-interface Reference : Value
+interface Reference : Value {
+	val id: String
+}
 
-class INT(val value:String) : Value
-class LOCAL(val id:String) : Reference
-class GLOBAL(val id:String) : Reference
+data class INT(val value:Int) : Value
+data class LOCAL(override val id:String) : Reference
+data class GLOBAL(override val id:String) : Reference
 
-class Argument(val type: Type, val name: Reference)
+class Argument(val type: Type, val name: LOCAL)
 
 class Body(val stms: List<Stm>)
 
 interface Decl {
-	class DEFINE(val type: Type, val name: Reference, val args: List<Argument>, val body: Body) : Decl
+	class DECFUN(val type: Type, val name: Reference, val args: List<Argument>, val body: Body) : Decl
 
 	object EMPTY : Decl
 }
@@ -163,13 +185,16 @@ interface Decl {
 class TypedValue(val type: Type, val value: Value)
 
 interface Stm {
-	class ALLOCA(val target: Reference, val type: Type) : Stm
-	class LOAD(val target: Reference, val targetType: Type, val from: TypedValue) : Stm
-	class ADD(val target: Reference, val type: Type, val left: Value, val right: Value) : Stm
+	class ALLOCA(val target: LOCAL, val type: Type) : Stm
+	class LOAD(val target: LOCAL, val targetType: Type, val from: TypedValue) : Stm
+	class ADD(val target: LOCAL, val type: Type, val left: Value, val right: Value) : Stm {
+		val typedLeft = TypedValue(type, left)
+		val typedRight = TypedValue(type, right)
+	}
 
 	class STORE(val src: TypedValue, val dst: TypedValue) : Stm
-	class RET(val type: Type, val ref: Value) : Stm
-	class CALL(val target:Reference, val rettype: Type, val name: Reference, val args: List<TypedValue>) : Stm
+	class RET(val typedValue: TypedValue) : Stm
+	class CALL(val target:LOCAL, val rettype: Type, val name: Reference, val args: List<TypedValue>) : Stm
 }
 
 fun TokenReader<String>.readDefinition(): Stm {
@@ -177,7 +202,7 @@ fun TokenReader<String>.readDefinition(): Stm {
 	when (kind) {
 		"%" -> {
 			unread()
-			val target = readReference()
+			val target = readReference() as LOCAL
 			expect("=")
 			val op = read()
 			when (op) {
@@ -225,11 +250,7 @@ fun TokenReader<String>.readDefinition(): Stm {
 			tryReadExtra()
 			return Stm.STORE(src, dst)
 		}
-		"ret" -> {
-			val type = readType()
-			val reg = readValue()
-			return Stm.RET(type, reg)
-		}
+		"ret" -> return Stm.RET(readTypedValue())
 		else -> invalidOp(kind)
 	}
 }

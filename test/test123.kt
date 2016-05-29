@@ -1,6 +1,10 @@
 import com.jtransc.text.StrReader
 import com.jtransc.text.TokenReader
+import org.junit.Assert
 import org.junit.Test
+import java.io.File
+import java.net.URL
+import java.net.URLClassLoader
 
 class Test123 {
 	@Test fun test1() {
@@ -31,9 +35,15 @@ class Test123 {
 			}"""
 		val tokens = StrReader(ll).tokenize()
 		//val tokens = GenericTokenize(StringReader(ll))
-		val program = TokenReader(tokens).parse()
+		val program = TokenReader(tokens).parse("Hello")
 
-		program.dump()
+		//program.dump()
+
+		val clazzBa = ClassGen.generate(program)
+		File("${program.className}.class").writeBytes(clazzBa)
+		val clazz = getClassFromByteArray(program.className, clazzBa)
+		//println(clazz)
+
+		Assert.assertEquals(10, clazz.getMethod("main").invoke(null))
 	}
 }
-

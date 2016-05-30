@@ -51,13 +51,8 @@ class Test123 {
 
 	@Test fun test2() {
 		Assert.assertEquals(9, runCppProgram("""
-			int sum(int a, int b, int c) {
-				return a + b + c;
-			}
-
-			int main() {
-				return 3 + sum(1, 2, 3);
-			}
+			int sum(int a, int b, int c) { return a + b + c; }
+			int main() { return 3 + sum(1, 2, 3); }
 		""", optimizations = false))
 	}
 
@@ -72,6 +67,12 @@ class Test123 {
 		Assert.assertEquals(15, runCppProgram("""
 			int mul(int a, int b, int c, int d, int e) { return a + b * c - d / e; }
 			int main() { return 3 + mul(1, 2, 3, -10, 2); }
+		""", optimizations = false))
+	}
+
+	@Test fun test5() {
+		Assert.assertEquals(0, runCppProgram("""
+			int main() { puts("HELLO"); return 0; }
 		""", optimizations = false))
 	}
 

@@ -23,7 +23,17 @@ fun TokenReader<String>.readBasicType(): Type.Basic {
 }
 
 fun TokenReader<String>.readType(): Type {
-	var out: Type = readBasicType()
+	var out: Type = when (peek()) {
+		"[" -> {
+			expect("[")
+			val count = readInt()
+			expect("x")
+			val elementtype = readType()
+			expect("]")
+			Type.ARRAY(elementtype, count)
+		}
+		else -> readBasicType()
+	}
 	while (this.tryRead("*")) {
 		out = Type.PTR(out)
 	}
@@ -32,6 +42,11 @@ fun TokenReader<String>.readType(): Type {
 
 fun TokenReader<String>.readId(): String {
 	return this.read()
+}
+
+fun TokenReader<String>.readInt(): Int {
+	val vs = this.read()
+	return vs.toInt()
 }
 
 fun TokenReader<String>.readReference(): Reference {
@@ -47,12 +62,15 @@ fun TokenReader<String>.readReference(): Reference {
 fun TokenReader<String>.readValue(): Value {
 	if (peek() in setOf("%", "@")) {
 		return readReference()
+	} else if (tryRead("c")) {
+		// i8 array!
+		return I8ARRAY(read())
 	} else {
 		val p = this.read()
-		if (p == "-") {
-			return INT(-this.read().toInt())
-		} else {
-			return INT(p.toInt())
+		return when (p) {
+			"getelementptr" -> noImpl("getelementptr")
+			"-" -> INT(-this.read().toInt())
+			else -> INT(p.toInt())
 		}
 	}
 }
@@ -120,9 +138,103 @@ fun TokenReader<String>.parseToplevel(): Decl {
 			expect("}")
 			return Decl.EMPTY
 		}
+	// Global Variables
+	//"%",
+
+	// @<GlobalVarName> = [Linkage] [Visibility] [DLLStorageClass] [ThreadLocal]
+	//	[unnamed_addr] [AddrSpace] [ExternallyInitialized]
+	//	<global | constant> <Type> [<InitializerConstant>]
+	//	[, section "name"] [, comdat [($name)]]
+	//	[, align <Alignment>]
+		"@" -> {
+			expect(setOf("%", "@"))
+			val id = read()
+			println(id)
+			expect("=")
+			val linkage = tryReadLinkageType()
+			val visibility = tryReadVisibilityStyle()
+			val dllStorage = tryReadDllStorage()
+			val threadLocal = tryReadThreadLocalStorageModel()
+			val unnamedAddr = tryReadUnnamedAddr()
+			val addrSpace = tryReadAddrSpace()
+			val externallyInitialized = tryReadExternallyInitialized()
+			val globalConstant = tryReadGlobalConstant()
+			val type = readType()
+			val value = readValue()
+			while (tryRead(",")) {
+				val attr = read()
+				when (attr) {
+					"section" -> {
+						read()
+					}
+					"comdat" -> {
+						read()
+					}
+					"align" -> {
+						read()
+					}
+					else -> {
+						noImpl("Unknown : $attr")
+					}
+				}
+			}
+			//[, section "name"] [, comdat [($name)]]
+			//[, align <Alignment>]
+			return Decl.DECVAR(id, value)
+		}
 		else -> invalidOp("$key")
 	}
+}
 
+private fun TokenReader<String>.tryReadAddrSpace(): String? {
+	return null
+}
+
+private fun TokenReader<String>.tryReadExternallyInitialized(): String? {
+	return null
+}
+
+private fun TokenReader<String>.tryReadGlobalConstant(): String? {
+	return tryReadGet("global", "constant")
+}
+
+private fun TokenReader<String>.tryReadUnnamedAddr(): String? {
+	return tryReadGet("unnamed_addr")
+}
+
+private fun TokenReader<String>.tryReadThreadLocalStorageModel(): String? {
+	return tryReadGet("localdynamic", "initialexec", "localexec")
+}
+
+private fun TokenReader<String>.tryReadLinkageType(): String? {
+	return tryReadGet(
+		"private", "internal", "available_externally",
+		"linkonce", "weak", "common", "appending",
+		"extern_weak", "linkonce_odr", "weak_odr",
+		"external"
+	)
+}
+
+private fun TokenReader<String>.tryReadVisibilityStyle(): String? {
+	return tryReadGet(
+		"default", "hidden", "protected"
+	)
+}
+
+private fun TokenReader<String>.tryReadCallingConvention(): String? {
+	val base = tryReadGet(
+		"ccc", "fastcc", "coldcc", "cc", "webkit_jscc", "anyregcc", "preserve_mostcc",
+		"preserve_allcc", "cxx_fast_tlscc", "swiftcc"
+
+	)
+	return when (base) {
+		"cc" -> "cc" + read()
+		else -> base
+	}
+}
+
+private fun TokenReader<String>.tryReadDllStorage(): String? {
+	return tryReadGet("dllimport", "dllexport")
 }
 
 fun TokenReader<String>.readAttribute() {
@@ -137,6 +249,26 @@ fun TokenReader<String>.tryReadExtra() {
 	}
 }
 
+fun TokenReader<String>.tryReadParameterAttributes() {
+	loop@while (true) {
+		when (peek()) {
+			"zeroext", "signext", "inreg", "byval", "inalloca",
+			"sret", "noalias", "nocapture", "nest",
+			"returned", "nonnull"
+			-> {
+				read()
+				continue@loop
+			}
+			"align", "dereferenceable", "dereferenceable_or_null", "swiftself", "swifterror" -> {
+				read()
+				read()
+				continue@loop
+			}
+			else -> break@loop
+		}
+	}
+}
+
 fun TokenReader<String>.readDefinitions(): Body {
 	val stms = arrayListOf<Stm>()
 	while (peek() != "}") stms += readDefinition()
@@ -148,6 +280,7 @@ interface Type {
 	object VOID : Basic
 	data class INT(val width: Int) : Basic
 	data class PTR(val type: Type) : Type
+	data class ARRAY(val type: Type, val count: Int) : Type
 	companion object {
 		val INT8 = INT(8)
 		val INT16 = INT(16)
@@ -174,6 +307,7 @@ interface Reference : Value {
 }
 
 data class INT(val value:Int) : Value
+data class I8ARRAY(val value:String) : Value
 data class LOCAL(override val id:String) : Reference
 data class GLOBAL(override val id:String) : Reference
 
@@ -183,7 +317,7 @@ class Body(val stms: List<Stm>)
 
 interface Decl {
 	class DECFUN(val type: Type, val name: Reference, val args: List<Argument>, val body: Body) : Decl
-
+	class DECVAR(val id: String, val value: Value) : Decl
 	object EMPTY : Decl
 }
 
@@ -270,7 +404,7 @@ fun StrReader.tokenize(): List<String> {
 }
 
 val ops = setOf(
-	"%", ",", "=", "@", "'", ".", ":", "(", ")", "[", "]", "{", "}", "#",
+	"%", ",", "=", "@", "'", ":", "(", ")", "[", "]", "{", "}", "#",
 	"*", "-", "+"
 )
 
@@ -293,8 +427,8 @@ fun StrReader.readToken(): String? {
 				this.offset++
 				return out
 			}
-			in 'a'..'z', in 'A'..'Z', in '0'..'9', '_' -> {
-				return readWhile { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' }!!
+			in 'a'..'z', in 'A'..'Z', in '0'..'9', '_', '.' -> {
+				return readWhile { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' || it == '.' }!!
 			}
 			'\u0000' -> {
 				readch()
@@ -307,4 +441,9 @@ fun StrReader.readToken(): String? {
 		}
 	}
 	return null
+}
+
+fun <T> TokenReader<T>.tryReadGet(vararg expected: T): T? {
+	val v = peek()
+	return if (this.tryRead(*expected)) v else null
 }

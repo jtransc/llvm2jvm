@@ -95,14 +95,14 @@ class Test123 {
 		Assert.assertEquals(Result(0, "LO"), runCppProgram("""
 			char* data = "HELLO";
 			int main() { puts(data + 3); return 0; }
-		""", optimizations = false, debug = false))
+		""", optimizations = false, debug = true))
 	}
 
 	@Test fun test9() {
 		Assert.assertEquals(Result(777), runCppProgram("""
 			int data[] = {333, 777, 999};
 			int main() { return data[1]; }
-		""", optimizations = false, debug = false))
+		""", optimizations = false, debug = true))
 	}
 
 	@Test fun test10() {

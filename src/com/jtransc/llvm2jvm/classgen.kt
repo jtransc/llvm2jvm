@@ -285,6 +285,7 @@ object ClassGen {
 						}
 					} else {
 						visit(value.idx2)
+						conv(value.idx2.type, Type.INT32)
 						if (mult != 1) {
 							mv.INT(mult)
 							mv.visitInsn(Opcodes.IMUL)
@@ -328,8 +329,10 @@ object ClassGen {
 
 		override fun visit(stm: Stm.GETELEMETPTR) {
 			val elementSize = stm.type1.getSizeInBytes()
+			val offset = stm.offsets.last()
 			visit(stm.ptr)
-			visit(stm.offsets.last())
+			visit(offset)
+			conv(offset.type, Type.INT32)
 			if (elementSize != 1) {
 				mv.INT(stm.type1.getSizeInBytes())
 				mv.visitInsn(Opcodes.IMUL)
@@ -472,19 +475,24 @@ object ClassGen {
 
 		private fun conv(from: Type, to: Type) {
 			fun invalid(): Nothing = noImpl("Not implemented conversion: $from to $to")
-			when (from) {
-				Type.INT32 -> when (to) {
-					Type.INT32 -> Unit
-					Type.INT64 -> mv.visitInsn(Opcodes.I2L)
-					else -> invalid()
-				}
-				is Type.PTR -> when (to) {
+			if (from != to) {
+				when (from) {
+					Type.INT32 -> when (to) {
+						Type.INT64 -> mv.visitInsn(Opcodes.I2L)
+						else -> invalid()
+					}
+					Type.INT64 -> when (to) {
+						Type.INT32 -> mv.visitInsn(Opcodes.L2I)
+						else -> invalid()
+					}
+					is Type.PTR -> when (to) {
 					//Type.INT32 -> Unit
 					//Type.INT64 -> mv.visitInsn(Opcodes.I2L)
-					is Type.PTR -> Unit
+						is Type.PTR -> Unit
+						else -> invalid()
+					}
 					else -> invalid()
 				}
-				else -> invalid()
 			}
 		}
 

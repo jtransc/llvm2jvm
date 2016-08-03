@@ -1,3 +1,5 @@
+package com.jtransc.llvm2jvm
+
 import com.jtransc.error.noImpl
 
 open class ProgramVisitor {
@@ -67,6 +69,8 @@ open class ProgramVisitor {
 			is Stm.JUMP -> visit(stm)
 			is Stm.PHI -> visit(stm)
 			is Stm.TERNARY -> visit(stm)
+			is Stm.SEXT -> visit(stm)
+			is Stm.BITCAST -> visit(stm)
 			else -> noImpl("Not implemented stm: $stm")
 		}
 	}
@@ -84,7 +88,7 @@ open class ProgramVisitor {
 	}
 
 	open fun visit(stm: Stm.CALL) {
-		visit(stm.target)
+		if (stm.target != null) visit(stm.target)
 		visit(stm.rettype)
 		visit(stm.name)
 		for (arg in stm.args) visit(arg)
@@ -121,5 +125,11 @@ open class ProgramVisitor {
 	}
 
 	open fun visit(stm: Stm.TERNARY) {
+	}
+
+	open fun visit(stm: Stm.SEXT) {
+	}
+
+	open fun visit(stm: Stm.BITCAST) {
 	}
 }

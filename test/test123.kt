@@ -1,3 +1,7 @@
+import com.jtransc.llvm2jvm.ClassGen
+import com.jtransc.llvm2jvm.getClassFromByteArray
+import com.jtransc.llvm2jvm.parse
+import com.jtransc.llvm2jvm.tokenize
 import com.jtransc.text.StrReader
 import com.jtransc.text.TokenReader
 import com.jtransc.text.captureStdout
@@ -37,7 +41,7 @@ class Test123 {
 		//val tokens = GenericTokenize(StringReader(ll))
 		val program = TokenReader(tokens).parse("Hello")
 
-		//program.dump()
+		//program.com.jtransc.llvm2jvm.dump()
 
 		val clazzBa = ClassGen.generate(program)
 		File("${program.className}.class").writeBytes(clazzBa)
@@ -135,6 +139,40 @@ class Test123 {
 		""", optimizations = true, debug = true))
 	}
 
+	@Test fun test14() {
+		Assert.assertEquals(Result(140), runCppProgram("""
+			int data[] = {4,5,6,7,9,10,22,33,44};
+			int main() {
+				int sum = 0;
+				for (int n = 0; n < (sizeof(data) / sizeof(data[0])); n++) sum += data[n];
+				return sum;
+			}
+		""", optimizations = false, debug = true))
+	}
+
+	@Test fun test15() {
+		Assert.assertEquals(Result(6), runCppProgram("""
+			typedef int Test2;
+			typedef struct { int a, b; } Test;
+			int main() {
+				Test t = {1, 2};
+				Test2 t2 = 3;
+				return t.a + t.b + t2;
+			}
+		""", optimizations = false, debug = true))
+	}
+
+	@Test fun test16() {
+		Assert.assertEquals(Result(140), runCppProgram("""
+			#include <stdio.h>
+			int main() {
+				puts("Hello world!");
+				return 0;
+			}
+		""", optimizations = false, debug = true))
+	}
+
+
 	//@Test fun test12() {
 	//	Assert.assertEquals(Result(-23321), runCppProgram("""
 	//		typedef unsigned char uint8_t;
@@ -223,7 +261,7 @@ class Test123 {
 			File("Hello.class").writeBytes(clazzBa)
 		}
 
-		val clazz = getClassFromByteArray(program.className, clazzBa)
+		val clazz = getClassFromByteArray(program.internalClassName, clazzBa)
 		var retval: Any? = 0
 		val stdout = captureStdout {
 			retval = clazz.getMethod("main").invoke(null)

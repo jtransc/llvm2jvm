@@ -1,3 +1,5 @@
+package com.jtransc.llvm2jvm;
+
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -101,4 +103,16 @@ public class LlvmRuntime {
 
     static public boolean slt(int a, int b) { return (a < b); }
     static public boolean sgt(int a, int b) { return (a > b); }
+    static public boolean ult(int a, int b) { return Integer.compareUnsigned(a, b) < 0; }
+
+    static public boolean slt(long a, long b) { return (a < b); }
+    static public boolean sgt(long a, long b) { return (a > b); }
+    static public boolean ult(long a, long b) { return Long.compareUnsigned(a, b) < 0; }
+
+    static public void llvm_memcpy_p0i8_p0i8_i64(int dst, int src, long len, int align, boolean isvolatile) {
+        for (int n = 0; n < len; n++) {
+            si8(dst + n, li8(src + n));
+        }
+        //System.out.println("llvm_memcpy_p0i8_p0i8_i64");
+    }
 }

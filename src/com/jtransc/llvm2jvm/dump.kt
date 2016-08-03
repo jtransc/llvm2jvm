@@ -1,3 +1,5 @@
+package com.jtransc.llvm2jvm
+
 import com.jtransc.error.noImpl
 
 fun Program.dump() {
@@ -9,7 +11,7 @@ fun Program.dump() {
 
 fun Decl.dump() {
 	when (this) {
-		Decl.EMPTY -> println("// Decl.EMPTY")
+		Decl.EMPTY -> println("// com.jtransc.llvm2jvm.Decl.EMPTY")
 		is Decl.DECFUN -> {
 			println(this.type.dump() + " " + this.name.dump() + "(" + this.args.map { it.dump() }.joinToString(", ") + ") {")
 			this.body.dump()
@@ -43,9 +45,13 @@ fun Stm.dump() {
 			println("  ret ${this.typedValue.dump()}")
 		}
 		is Stm.CALL -> {
-			println("  ${this.target.dump()} = call ${this.rettype.dump()} ${this.name.dump()}(" + this.args.map { it.dump() }.joinToString(", ") + ")")
+			if (this.target != null) {
+				println("  ${this.target.dump()} = call ${this.rettype.dump()} ${this.name.dump()}(" + this.args.map { it.dump() }.joinToString(", ") + ")")
+			} else {
+				println("  call ${this.rettype.dump()} ${this.name.dump()}(" + this.args.map { it.dump() }.joinToString(", ") + ")")
+			}
 		}
-		else -> noImpl("Stm.dump: $this")
+		else -> noImpl("com.jtransc.llvm2jvm.Stm.com.jtransc.llvm2jvm.dump: $this")
 	}
 }
 

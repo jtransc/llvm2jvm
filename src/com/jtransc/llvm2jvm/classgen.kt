@@ -1,3 +1,5 @@
+package com.jtransc.llvm2jvm
+
 import com.jtransc.error.invalidOp
 import com.jtransc.error.noImpl
 import com.jtransc.io.i32
@@ -13,16 +15,20 @@ import java.lang.reflect.Method
 import java.net.URL
 import java.net.URLClassLoader
 import java.util.*
+import kotlin.reflect.KCallable
+
+val Class<*>.internalName: String get() = this.canonicalName.replace('.', '/')
+val KCallable<*>.internalName: String get() = this.name
 
 // https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html
 object ClassGen {
 	fun generate(program: Program) = Impl().apply { this.visit(program) }.cw.toByteArray()
 
 	private class Impl : ProgramVisitor() {
-		val ALLOCA = MethodRef(LlvmRuntime::class.java.name, LlvmRuntime::alloca.name, "(I)I")
-		val LI32 = MethodRef(LlvmRuntime::class.java.name, LlvmRuntime::li32.name, "(I)I")
-		val SI32 = MethodRef(LlvmRuntime::class.java.name, LlvmRuntime::si32.name, "(II)V")
-		val SP = FieldRef(LlvmRuntime::class.java.name, LlvmRuntime::SP.name, "I")
+		val ALLOCA = MethodRef(LlvmRuntime::class.java.internalName, LlvmRuntime::alloca.internalName, "(I)I")
+		val LI32 = MethodRef(LlvmRuntime::class.java.internalName, LlvmRuntime::li32.internalName, "(I)I")
+		val SI32 = MethodRef(LlvmRuntime::class.java.internalName, LlvmRuntime::si32.internalName, "(II)V")
+		val SP = FieldRef(LlvmRuntime::class.java.internalName, LlvmRuntime::SP.internalName, "I")
 		val LocalSP = LOCAL("%SP")
 
 		lateinit var program: Program
@@ -36,14 +42,7 @@ object ClassGen {
 		override fun visit(program: Program) {
 			this.program = program
 			cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
-			cw.visit(
-				50,
-				ACC_PUBLIC + ACC_SUPER,
-				program.className,
-				null,
-				"java/lang/Object",
-				null
-			)
+			cw.visit(50, ACC_PUBLIC + ACC_SUPER, program.className, null, "java/lang/Object", null)
 
 			//cw.visitSource("Hello.java", null);
 
@@ -61,14 +60,14 @@ object ClassGen {
 
 			mv = cw.visitMethod(ACC_PUBLIC, "<clinit>", "()V", null, null)
 			mv.visitFieldInsn(GETSTATIC, program.className, "STATIC_DATA", "Ljava/lang/String;")
-			mv.visitMethodInsn(INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::initStaticData.name, "(Ljava/lang/String;)V", false)
+			mv.visitMethodInsn(INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::initStaticData.internalName, "(Ljava/lang/String;)V", false)
 			mv.visitInsn(RETURN)
 			mv.visitMaxs(1, 1)
 			mv.visitEnd()
 
 			mv = cw.visitMethod(ACC_STATIC or ACC_PUBLIC, "main", "([Ljava/lang/String;)V", null, null)
 			mv.visitLdcInsn(getJavaObjectType(program.className))
-			mv.visitMethodInsn(INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::mainBootstrap.name, "(Ljava/lang/Class;)V", false)
+			mv.visitMethodInsn(INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::mainBootstrap.internalName, "(Ljava/lang/Class;)V", false)
 			mv.visitInsn(RETURN)
 			mv.visitMaxs(1, 1)
 			mv.visitEnd()
@@ -81,7 +80,7 @@ object ClassGen {
 
 		class GlobalInfo(val basename:String, val id: Int, val address: Int) {
 			//val name = "global$id"
-			val name = if (basename.startsWith("\\")) "_global$id" else basename
+			val name = if (basename.startsWith("\\") || basename.contains('.')) "_global$id" else basename
 		}
 
 		var globalId = 0
@@ -109,6 +108,9 @@ object ClassGen {
 						data.write(temp, 0, 4)
 					}
 					is GENERICARRAY -> {
+						for (v in value.values) writeBytes(v)
+					}
+					is GENERICSTRUCT -> {
 						for (v in value.values) writeBytes(v)
 					}
 					else -> invalidOp("Don't know how to store $value")
@@ -190,7 +192,7 @@ object ClassGen {
 			localCount = 0
 			maxStackCount = 10
 
-			for (arg in decl.args) getLocalId(arg.name)
+			for (arg in decl.args) getLocalId(arg.type, arg.name)
 
 			this.preserveSP = decl.body.stms.any { it is Stm.ALLOCA }
 
@@ -199,16 +201,20 @@ object ClassGen {
 				val phiLocal = if (phi.locals.any { it in locals }) {
 					phi.locals.map { locals[it] }.filterNotNull().first()
 				} else {
-					localCount++
+					getLocalId(phi.type, phi.locals[0])
 				}
 				for (local in phi.locals) locals[local] = phiLocal
 			}
 		}
 
+		fun normalizeMethodName(basename: String): String {
+			return basename.replace('.', '_')
+		}
+
 		override fun visit(decl: Decl.DECFUN) {
 			startFunction(decl)
 
-			mv = cw.visitMethod(ACC_STATIC or ACC_PUBLIC, (decl.name as GLOBAL).id, decl.getFunDescriptor(), null, null)
+			mv = cw.visitMethod(ACC_STATIC or ACC_PUBLIC, normalizeMethodName((decl.name as GLOBAL).id), decl.getFunDescriptor(), null, null)
 
 			if (preserveSP) {
 				mv.GETSTATIC(SP)
@@ -222,10 +228,20 @@ object ClassGen {
 			mv.visitEnd()
 		}
 
-		private fun getLocalId(local: LOCAL): Int = locals.getOrPut(local) { localCount++ }
+		private fun getLocalId(type: Type, local: LOCAL): Int {
+			return locals.getOrPut(local) {
+				val local = localCount
+				if (type.isLongOrDouble()) {
+					localCount += 2
+				} else {
+					localCount++
+				}
+				local
+			}
+		}
 
 		fun storeToLocal(type: Type, local: LOCAL) {
-			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(local))
+			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(type, local))
 		}
 
 		override fun visit(stm: Stm.ALLOCA) {
@@ -245,6 +261,8 @@ object ClassGen {
 			val value = typedValue.value
 			when (value) {
 				is INT -> mv.INT(value.value)
+				is LONG -> mv.LONG(value.value)
+				is BOOL -> mv.INT(if (value.value) 1 else 0)
 				is LOCAL -> _load(typedValue.type, value)
 				is GLOBAL -> _load(typedValue.type, value)
 				is GETELEMENTPTR -> {
@@ -274,6 +292,10 @@ object ClassGen {
 						mv.visitInsn(Opcodes.IADD)
 					}
 				}
+				is BITCAST -> {
+					// @TODO: Proper BITCAST
+					visit(TypedValue(value.fromType, value.ref))
+				}
 				else -> noImpl("value: $value")
 			}
 		}
@@ -298,7 +320,7 @@ object ClassGen {
 				Type.INT32 -> mv.INVOKESTATIC(LI32)
 				is Type.PTR -> mv.INVOKESTATIC(LI32)
 				else -> {
-					noImpl("Stm.LOAD: ${stm.targetType}")
+					noImpl("com.jtransc.llvm2jvm.Stm.LOAD: ${stm.targetType}")
 				}
 			}
 			storeToLocal(stm.targetType, stm.target)
@@ -307,7 +329,7 @@ object ClassGen {
 		override fun visit(stm: Stm.GETELEMETPTR) {
 			val elementSize = stm.type1.getSizeInBytes()
 			visit(stm.ptr)
-			visit(stm.offset)
+			visit(stm.offsets.last())
 			if (elementSize != 1) {
 				mv.INT(stm.type1.getSizeInBytes())
 				mv.visitInsn(Opcodes.IMUL)
@@ -326,6 +348,7 @@ object ClassGen {
 				"sdiv" -> mv.DIV(stm.type)
 				"slt" -> mv.SLT(stm.type)
 				"sgt" -> mv.SGT(stm.type)
+				"ult" -> mv.SLT(stm.type)
 				else -> noImpl("Unsupported op ${stm.op}")
 			}
 			_store(stm.type, stm.target)
@@ -336,7 +359,10 @@ object ClassGen {
 		fun _load(type: Type, local: LOCAL) {
 			when (type) {
 				Type.INT1, Type.INT32, is Type.PTR -> {
-					mv.visitVarInsn(Opcodes.ILOAD, getLocalId(local))
+					mv.visitVarInsn(Opcodes.ILOAD, getLocalId(type, local))
+				}
+				Type.INT64 -> {
+					mv.visitVarInsn(Opcodes.LLOAD, getLocalId(type, local))
 				}
 				else -> noImpl("${type}")
 			}
@@ -360,10 +386,10 @@ object ClassGen {
 
 			for (type in func.argTypes) {
 				if (type is Type.VARARG) {
-					val available = argReader.size - argReader.position
-					val local = getLocalId(LOCAL("temp_${tempId++}"))
+					val varargCount = argReader.size - argReader.position
+					val local = getLocalId(Type.ARRAY(Type.INT32, varargCount), LOCAL("temp_${tempId++}"))
 
-					mv.INT(available)
+					mv.INT(varargCount)
 					mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_INT)
 					mv.visitVarInsn(Opcodes.ASTORE, local)
 					var n = 0
@@ -380,17 +406,27 @@ object ClassGen {
 				}
 			}
 
-			when (name.id) {
-				// builtins!
-				"puts", "printf" -> {
-					//println("puts: $desc")
-					mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.name, name.id, desc, false)
+			if (name.id.startsWith("llvm.")) {
+				when (name.id) {
+					"llvm.memcpy.p0i8.p0i8.i64" -> {
+						mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::llvm_memcpy_p0i8_p0i8_i64.internalName, desc, false)
+					}
+					else -> noImpl("Not supported llvm intrinsic ${name.id}")
 				}
-				else -> {
-					mv.visitMethodInsn(Opcodes.INVOKESTATIC, program.className, name.id, desc, false)
+
+			} else {
+				when (name.id) {
+				// builtins!
+					"puts", "printf" -> {
+						//println("puts: $desc")
+						mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, name.id, desc, false)
+					}
+					else -> {
+						mv.visitMethodInsn(Opcodes.INVOKESTATIC, program.className, normalizeMethodName(name.id), desc, false)
+					}
 				}
 			}
-			_store(func.type, stm.target)
+			if (stm.target != null) _store(func.type, stm.target)
 		}
 
 		override fun visit(stm: Stm.RET) {
@@ -433,6 +469,36 @@ object ClassGen {
 			mv.visitLabel(contlabel)
 			_store(stm.vtrue.type, stm.target)
 		}
+
+		private fun conv(from: Type, to: Type) {
+			fun invalid(): Nothing = noImpl("Not implemented conversion: $from to $to")
+			when (from) {
+				Type.INT32 -> when (to) {
+					Type.INT32 -> Unit
+					Type.INT64 -> mv.visitInsn(Opcodes.I2L)
+					else -> invalid()
+				}
+				is Type.PTR -> when (to) {
+					//Type.INT32 -> Unit
+					//Type.INT64 -> mv.visitInsn(Opcodes.I2L)
+					is Type.PTR -> Unit
+					else -> invalid()
+				}
+				else -> invalid()
+			}
+		}
+
+		override fun visit(stm: Stm.SEXT) {
+			visit(stm.from)
+			conv(stm.from.type, stm.toType)
+			_store(stm.toType, stm.target)
+		}
+
+		override fun visit(stm: Stm.BITCAST) {
+			visit(stm.from)
+			conv(stm.from.type, stm.toType)
+			_store(stm.toType, stm.target)
+		}
 	}
 }
 
@@ -441,36 +507,40 @@ class FieldRef(val owner: String, val name:String, val desc:String)
 
 fun MethodVisitor.ADD(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.IADD)
-	else -> noImpl("${type}")
+	else -> noImpl("$type")
 }
 
 fun MethodVisitor.SUB(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.ISUB)
-	else -> noImpl("${type}")
+	else -> noImpl("$type")
 }
 
 fun MethodVisitor.MUL(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.IMUL)
-	else -> noImpl("${type}")
+	else -> noImpl("$type")
 }
 
 fun MethodVisitor.DIV(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.IDIV)
-	else -> noImpl("${type}")
+	else -> noImpl("$type")
 }
 
 fun MethodVisitor.SLT(type: Type) = when (type) {
-	Type.INT32 -> {
-		this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::slt.name, "(II)Z", false)
-	}
-	else -> noImpl("${type}")
+	Type.INT32 -> this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::slt.internalName, "(II)Z", false)
+	Type.INT64 -> this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::slt.internalName, "(JJ)Z", false)
+	else -> noImpl("$type")
+}
+
+fun MethodVisitor.ULT(type: Type) = when (type) {
+	Type.INT32 -> this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::ult.internalName, "(II)Z", false)
+	Type.INT64 -> this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::ult.internalName, "(JJ)Z", false)
+	else -> noImpl("$type")
 }
 
 fun MethodVisitor.SGT(type: Type) = when (type) {
-	Type.INT32 -> {
-		this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::sgt.name, "(II)Z", false)
-	}
-	else -> noImpl("${type}")
+	Type.INT32 -> this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::sgt.internalName, "(II)Z", false)
+	Type.INT64 -> this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::sgt.internalName, "(JJ)Z", false)
+	else -> noImpl("$type")
 }
 
 inline fun <reified T: Any> MethodVisitor.NEWARRAY() {
@@ -506,6 +576,18 @@ fun MethodVisitor.INT(value: Int) {
 		5 -> visitInsn(ICONST_5)
 		in Byte.MIN_VALUE .. Byte.MAX_VALUE -> visitIntInsn(Opcodes.BIPUSH, value)
 		in Short.MIN_VALUE .. Short.MAX_VALUE -> visitIntInsn(Opcodes.SIPUSH, value)
+		else -> {
+			visitLdcInsn(value)
+		}
+	}
+}
+
+fun MethodVisitor.LONG(value: Long) {
+	when (value) {
+		in Int.MIN_VALUE .. Int.MAX_VALUE -> {
+			this.INT(value.toInt())
+			visitInsn(Opcodes.I2L)
+		}
 		else -> {
 			visitLdcInsn(value)
 		}

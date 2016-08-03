@@ -1,4 +1,5 @@
 apply plugin: 'java'
+apply plugin: 'application'
 apply plugin: 'kotlin'
 apply plugin: 'maven'
 apply plugin: 'signing'
@@ -27,6 +28,7 @@ repositories {
 
 group = "com.jtransc"
 version = "$llvm2jvmVersion"
+mainClassName = "com.jtransc.llvm2jvm.MainKt"
 
 configurations {
     provided
@@ -45,7 +47,6 @@ sourceSets {
     test.resources.srcDirs = [ 'testresources', 'testassets' ]
 }
 
-
 dependencies {
     compile "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
     compile "org.jetbrains.kotlin:kotlin-runtime:$kotlinVersion"
@@ -54,3 +55,12 @@ dependencies {
     testCompile 'junit:junit:4.12'
 }
 
+jar {
+    manifest {
+        attributes "Main-Class": "$mainClassName"
+    }
+
+    from {
+        configurations.compile.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}

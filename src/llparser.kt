@@ -365,14 +365,26 @@ fun Type.toJavaType(): String {
 				else -> noImpl("Int width: $width")
 			}
 		}
-		//is Type.ARRAY -> "[" + this.type.toJavaType()
+	//is Type.ARRAY -> "[" + this.type.toJavaType()
 		is Type.ARRAY -> "I" // Pointer
 		is Type.PTR -> "I" // Pointer
-		//Type.VARARG -> "[Ljava/lang/Object;"
+	//Type.VARARG -> "[Ljava/lang/Object;"
 		Type.VARARG -> "I"
 		else -> noImpl("type: $this")
 	}
 }
+
+fun Type.getSizeInBits(): Int {
+	return when (this) {
+		is Type.INT -> this.width
+		is Type.ARRAY -> this.count * this.type.getSizeInBytes()
+		is Type.PTR -> 32
+		Type.VARARG -> 32
+		else -> noImpl("type: $this")
+	}
+}
+
+fun Type.getSizeInBytes(): Int = getSizeInBits() / 8
 
 interface Value
 interface Reference : Value {
@@ -396,6 +408,7 @@ data class I8ARRAY(val value: String) : Value {
 		out.toByteArray()
 	}
 }
+
 data class LOCAL(override val id: String) : Reference
 data class GLOBAL(override val id: String) : Reference
 data class BITCAST(val ref: Reference, val fromType: Type, val toType: Type) : Reference {
@@ -430,6 +443,7 @@ interface Stm {
 	class RET(val typedValue: TypedValue) : Stm
 	class CALL(val target: LOCAL, val rettype: Type, val name: Reference, val args: List<TypedValue>) : Stm
 	class LABEL(val name: String) : Stm
+	class GETELEMETPTR(val target: LOCAL, val inbounds: Boolean, val type1: Type, val ptr: TypedValue, val offset: TypedValue) : Stm
 }
 
 fun TokenReader<String>.readDefinition(): Stm {
@@ -474,6 +488,15 @@ fun TokenReader<String>.readDefinition(): Stm {
 					expect(")")
 					tryReadExtra()
 					return Stm.CALL(target, rettype, name, args)
+				}
+				"getelementptr" -> {
+					val inbounds = tryRead("inbounds")
+					val type1 = readType()
+					expect(",")
+					val ptr = readTypedValue()
+					expect(",")
+					val offset = readTypedValue()
+					return Stm.GETELEMETPTR(target, inbounds, type1, ptr, offset)
 				}
 				else -> invalidOp("readDefinition: $op")
 			}

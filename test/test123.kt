@@ -87,6 +87,13 @@ class Test123 {
 		""", optimizations = false, debug = false))
 	}
 
+	@Test fun test8() {
+		Assert.assertEquals(Result(0, "LO"), runCppProgram("""
+			char* data = "HELLO";
+			int main() { puts(data + 3); return 0; }
+		""", optimizations = false, debug = true))
+	}
+
 	private fun runCppProgram(cppCode: String, optimizations: Boolean, debug: Boolean = false): Any? {
 		val llCode = compileCppProgram(cppCode, optimizations)
 		if (debug) {

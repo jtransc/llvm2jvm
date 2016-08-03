@@ -34,7 +34,7 @@ object ClassGen {
 			this.program = program
 			cw = ClassWriter(0)
 			cw.visit(
-				49,
+				50,
 				ACC_PUBLIC + ACC_SUPER,
 				program.className,
 				null,
@@ -220,7 +220,19 @@ object ClassGen {
 					noImpl("Stm.LOAD: ${stm.targetType}")
 				}
 			}
-			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target as LOCAL))
+			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target))
+		}
+
+		override fun visit(stm: Stm.GETELEMETPTR) {
+			val elementSize = stm.type1.getSizeInBytes()
+			visit(stm.ptr)
+			visit(stm.offset)
+			if (elementSize != 1) {
+				mv.INT(stm.type1.getSizeInBytes())
+				mv.visitInsn(Opcodes.IMUL)
+			}
+			mv.visitInsn(Opcodes.IADD)
+			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target))
 		}
 
 		override fun visit(stm: Stm.BINOP) {

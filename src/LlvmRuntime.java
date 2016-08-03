@@ -30,8 +30,8 @@ public class LlvmRuntime {
         return SP;
     }
 
-    static public int getelementptr(int offset, int index) {
-        return offset + index;
+    static public int getelementptr(int offset, int index, int size) {
+        return offset + index * size;
     }
 
     static public void initStaticData(String data) {

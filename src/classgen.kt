@@ -1,12 +1,17 @@
+import com.jtransc.error.invalidOp
 import com.jtransc.error.noImpl
+import com.jtransc.mem.BytesWrite
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Opcodes.*
+import java.io.ByteArrayOutputStream
 import java.lang.reflect.Method
 import java.net.URL
 import java.net.URLClassLoader
+import java.util.*
 
+// https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html
 object ClassGen {
 	fun generate(program: Program) = Impl().apply { this.visit(program) }.cw.toByteArray()
 
@@ -48,19 +53,108 @@ object ClassGen {
 
 			super.visit(program)
 
+			createField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL, "STATIC_DATA", "Ljava/lang/String;", heapWriter.getDataAsString(GLOBALS))
+
+			mv = cw.visitMethod(ACC_PUBLIC, "<clinit>", "()V", null, null)
+			mv.visitFieldInsn(GETSTATIC, program.className, "STATIC_DATA", "Ljava/lang/String;")
+			mv.visitMethodInsn(INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::initStaticData.name, "(Ljava/lang/String;)V", false)
+			mv.visitInsn(RETURN)
+			mv.visitMaxs(1, 1)
+			mv.visitEnd()
+
 			cw.visitEnd()
 		}
 
+		class GlobalInfo(val basename:String, val id: Int, val address: Int) {
+			//val name = "global$id"
+			val name = if (basename.startsWith("\\")) "_global$id" else basename
+		}
+
+		var globalId = 0
+		val GLOBALS = hashMapOf<String, GlobalInfo>()
+
+		class HeapWriter {
+			val data = ByteArrayOutputStream()
+			val fixes = IdentityHashMap<Value, Int>()
+
+			fun writeBytes(value: Value): Int {
+				val ptr = data.size()
+				fixes[value] = ptr
+				when (value) {
+					is I8ARRAY -> {
+						data.write(value.bytes)
+
+					}
+					is GETELEMENTPTR -> {
+						data.write(ByteArray(4))
+					}
+					else -> invalidOp("Don't know how to store $value")
+				}
+				return ptr
+			}
+
+			fun getDataAsString(GLOBALS: Map<String, GlobalInfo>): String {
+				val bytes = data.toByteArray()
+
+				fun fixPointers() {
+					fun getAddress(value: Value): Int {
+						//when ()
+						return when (value) {
+							is GETELEMENTPTR -> {
+								getAddress(value.value.value)
+							}
+							is GLOBAL -> {
+								GLOBALS[value.id]!!.address
+							}
+							else -> invalidOp("getDataAsString.fixPointers: Not supported $value")
+						}
+					}
+
+					for ((value, offset) in fixes) {
+						when (value) {
+							is GETELEMENTPTR -> {
+								val fixedPointer = getAddress(value)
+								BytesWrite.writeIntLE(bytes, offset, fixedPointer)
+								//println("Fixed pointer: $offset -> $fixedPointer")
+							}
+						}
+					}
+				}
+
+				fun bytesToString(): String {
+					var out = ""
+					for (c in bytes) out += c.toChar()
+					return out
+				}
+
+				fixPointers()
+				return bytesToString()
+			}
+		}
+
+		val heapWriter = HeapWriter()
+
+		private fun createField(acc: Int, name: String, desc: String, default: Any?) {
+			cw.visitField(acc, name, desc, null, default).visitEnd()
+		}
+
+		override fun visit(decl: Decl.DECVAR) {
+			val address = heapWriter.writeBytes(decl.value)
+			val info = GlobalInfo(decl.id, globalId++, address)
+			GLOBALS[decl.id] = info
+			createField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL, info.name, "I", address)
+		}
+
 		// @TODO: Cache descriptor!
-		fun Decl.DECFUN.getFunDescriptor(): String {
-			val args = this.args.map { it.type.toJavaType() }.joinToString("")
+		fun Decl.DECLARE_BASE.getFunDescriptor(): String {
+			val args = this.argTypes.map { it.toJavaType() }.joinToString("")
 			val rettype = this.type.toJavaType()
 			return "($args)$rettype"
 		}
 
 		// @TODO: Create a lookup table!
-		fun Program.getFun(ref: Reference): Decl.DECFUN {
-			return this.decls.filterIsInstance<Decl.DECFUN>().first { it.name == ref }
+		fun Program.getFun(ref: Reference): Decl.DECLARE_BASE {
+			return this.decls.filterIsInstance<Decl.DECLARE_BASE>().firstOrNull { it.name.id == ref.id } ?: invalidOp("Cannot find function declaration $ref")
 		}
 
 		override fun visit(decl: Decl.DECFUN) {
@@ -95,6 +189,11 @@ object ClassGen {
 			when (value) {
 				is INT -> mv.INT(value.value)
 				is LOCAL -> _load(typedValue.type, value)
+				is GLOBAL -> _load(typedValue.type, value)
+				is GETELEMENTPTR -> {
+					// @TODO: indices!
+					visit(value.value)
+				}
 				else -> noImpl("value: $value")
 			}
 		}
@@ -105,12 +204,20 @@ object ClassGen {
 			mv.INVOKESTATIC(SI32)
 		}
 
+		override fun visit(stm: Stm.LABEL) {
+			//visit(stm.dst)
+			//visit(stm.src)
+			//mv.visitLabel()
+			//mv.INVOKESTATIC(SI32)
+		}
+
 		override fun visit(stm: Stm.LOAD) {
 			visit(stm.from)
 			when (stm.targetType) {
 				Type.INT32 -> mv.INVOKESTATIC(LI32)
+				is Type.PTR -> mv.INVOKESTATIC(LI32)
 				else -> {
-					noImpl("${stm.targetType}")
+					noImpl("Stm.LOAD: ${stm.targetType}")
 				}
 			}
 			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target as LOCAL))
@@ -147,14 +254,35 @@ object ClassGen {
 			}
 		}
 
+		fun getVarDecl(id: String): Decl.DECVAR {
+			return program.decls.filterIsInstance<Decl.DECVAR>().firstOrNull { it.id == id } ?: invalidOp("Cannot find global $id")
+		}
+
+		fun _load(type: Type, global: GLOBAL) {
+			val info = GLOBALS[global.id] ?: invalidOp("Cannot find global ${global.id}")
+			mv.visitFieldInsn(Opcodes.GETSTATIC, program.className, info.name, getVarDecl(global.id).type.toJavaType())
+		}
+
 		override fun visit(stm: Stm.CALL) {
-			for (arg in stm.args) {
-				visit(arg)
-			}
 			val func = program.getFun(stm.name)
 			val name = func.name
 			val desc = func.getFunDescriptor()
-			mv.visitMethodInsn(Opcodes.INVOKESTATIC, program.className, name.id, desc, false)
+			for ((arg, type) in stm.args.zip(func.argTypes)) {
+				visit(arg)
+				//if (arg.type != type) {
+				//	mv.visitTypeInsn(Opcodes.CHECKCAST, type.toJavaType())
+				//}
+			}
+			when (name.id) {
+				// builtins!
+				"puts" -> {
+					//println("puts: $desc")
+					mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.name, name.id, desc, false)
+				}
+				else -> {
+					mv.visitMethodInsn(Opcodes.INVOKESTATIC, program.className, name.id, desc, false)
+				}
+			}
 			_store(func.type, stm.target)
 		}
 

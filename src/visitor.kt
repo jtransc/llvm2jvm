@@ -9,10 +9,18 @@ open class ProgramVisitor {
 		when (decl) {
 			is Decl.EMPTY -> visit(decl)
 			is Decl.DECFUN -> visit(decl)
+			is Decl.DECLARE -> visit(decl)
+			is Decl.DECVAR -> visit(decl)
 		}
 	}
 
 	open fun visit(decl: Decl.EMPTY) {
+	}
+
+	open fun visit(decl: Decl.DECLARE) {
+	}
+
+	open fun visit(decl: Decl.DECVAR) {
 	}
 
 	open fun visit(decl: Decl.DECFUN) {
@@ -53,6 +61,7 @@ open class ProgramVisitor {
 			is Stm.LOAD -> visit(stm)
 			is Stm.RET -> visit(stm)
 			is Stm.STORE -> visit(stm)
+			is Stm.LABEL -> visit(stm)
 			else -> noImpl("Not implemented stm: $stm")
 		}
 	}
@@ -89,5 +98,8 @@ open class ProgramVisitor {
 	open fun visit(stm: Stm.STORE) {
 		visit(stm.src)
 		visit(stm.dst)
+	}
+
+	open fun visit(stm: Stm.LABEL) {
 	}
 }

@@ -1,13 +1,16 @@
 import com.jtransc.error.invalidOp
 import com.jtransc.error.noImpl
+import com.jtransc.numeric.toInt
 import com.jtransc.text.StrReader
 import com.jtransc.text.TokenReader
 import com.jtransc.text.readUntil
 import com.jtransc.text.readWhile
+import java.io.ByteArrayOutputStream
+import java.util.*
 
-class Program(val className:String, val decls: List<Decl>)
+class Program(val className: String, val decls: List<Decl>)
 
-fun TokenReader<String>.parse(className:String) = Program(className, parseToplevelList())
+fun TokenReader<String>.parse(className: String) = Program(className, parseToplevelList())
 
 fun TokenReader<String>.readArgument(): Argument {
 	return Argument(readType(), readReference() as LOCAL)
@@ -17,6 +20,8 @@ fun TokenReader<String>.readBasicType(): Type.Basic {
 	val type = this.read()
 	if (type.startsWith("i")) {
 		return Type.INT(type.substring(1).toInt())
+	} else if (type == "...") {
+		return Type.VARARG
 	} else {
 		invalidOp("Invalid BasicType: $type")
 	}
@@ -33,6 +38,16 @@ fun TokenReader<String>.readType(): Type {
 			Type.ARRAY(elementtype, count)
 		}
 		else -> readBasicType()
+	}
+	if (this.tryRead("(")) {
+		val args = arrayListOf<Type>()
+		while (true) {
+			args += this.readType()
+			if (this.tryRead(",")) continue
+			if (this.tryRead(")")) break
+			//invalidOp("Not implemented functional types")
+		}
+		out = Type.FUNCTION(out, args)
 	}
 	while (this.tryRead("*")) {
 		out = Type.PTR(out)
@@ -54,8 +69,16 @@ fun TokenReader<String>.readReference(): Reference {
 		return LOCAL(this.read())
 	} else if (tryRead("@")) {
 		return GLOBAL(this.read())
+	} else if (tryRead("bitcast")) {
+		expect("(")
+		val fromType = readType()
+		val ref = readReference()
+		expect("to")
+		val toType = readType()
+		expect(")")
+		return BITCAST(ref, fromType, toType)
 	} else {
-		invalidOp(":" + this.peek())
+		invalidOp("readReference: '" + this.peek() + "'")
 	}
 }
 
@@ -68,7 +91,19 @@ fun TokenReader<String>.readValue(): Value {
 	} else {
 		val p = this.read()
 		return when (p) {
-			"getelementptr" -> noImpl("getelementptr")
+			"getelementptr" -> {
+				val inbounds = tryRead("inbounds")
+				expect("(")
+				val type = readType()
+				expect(",")
+				val base = readTypedValue()
+				expect(",")
+				val idx1 = readTypedValue()
+				expect(",")
+				val idx2 = readTypedValue()
+				expect(")")
+				GETELEMENTPTR(inbounds, type, base, idx1, idx2)
+			}
 			"-" -> INT(-this.read().toInt())
 			else -> INT(p.toInt())
 		}
@@ -85,6 +120,18 @@ fun TokenReader<String>.parseToplevelList(): List<Decl> {
 	return out
 }
 
+fun TokenReader<String>.readAttributes() {
+	// Attributes
+	while (peek() == "#") {
+		if (tryRead("#")) {
+			val number = read()
+		} else {
+			invalidOp("invalid ${peek()}")
+		}
+	}
+
+}
+
 fun TokenReader<String>.parseToplevel(): Decl {
 	val key = peek()
 	when (key) {
@@ -95,6 +142,21 @@ fun TokenReader<String>.parseToplevel(): Decl {
 			val string = read()
 			//println("target $type = $string")
 			return Decl.EMPTY
+		}
+		"declare" -> {
+			expect("declare")
+			val type = readType()
+			val name = readReference()
+			val args = arrayListOf<Type>()
+			expect("(")
+			while (peek() != ")") {
+				args += readType()
+				if (tryRead(",")) continue
+				if (peek() == ")") break
+			}
+			expect(")")
+			readAttributes()
+			return Decl.DECLARE(type, name, args)
 		}
 		"define" -> {
 			expect("define")
@@ -108,22 +170,10 @@ fun TokenReader<String>.parseToplevel(): Decl {
 				if (peek() == ")") break
 			}
 			expect(")")
-
-			// Attributes
-			while (peek() != "{") {
-				if (tryRead("#")) {
-					val number = read()
-				} else {
-					invalidOp("invalid ${peek()}")
-				}
-			}
-
+			readAttributes()
 			expect("{")
-
 			val body = readDefinitions()
-
 			expect("}")
-
 			return Decl.DECFUN(type, name, args, body)
 		}
 		"attributes" -> {
@@ -132,9 +182,7 @@ fun TokenReader<String>.parseToplevel(): Decl {
 			val id = read()
 			expect("=")
 			expect("{")
-			while (peek() != "}") {
-				readAttribute()
-			}
+			while (peek() != "}") readAttribute()
 			expect("}")
 			return Decl.EMPTY
 		}
@@ -149,7 +197,7 @@ fun TokenReader<String>.parseToplevel(): Decl {
 		"@" -> {
 			expect(setOf("%", "@"))
 			val id = read()
-			println(id)
+			//println(id)
 			expect("=")
 			val linkage = tryReadLinkageType()
 			val visibility = tryReadVisibilityStyle()
@@ -168,7 +216,6 @@ fun TokenReader<String>.parseToplevel(): Decl {
 						read()
 					}
 					"comdat" -> {
-						read()
 					}
 					"align" -> {
 						read()
@@ -180,7 +227,22 @@ fun TokenReader<String>.parseToplevel(): Decl {
 			}
 			//[, section "name"] [, comdat [($name)]]
 			//[, align <Alignment>]
-			return Decl.DECVAR(id, value)
+			return Decl.DECVAR(id, type, value)
+		}
+		"\$" -> { // Comdats
+			expect(setOf("\$"))
+			val id = read()
+			expect("=")
+			expect("comdat")
+			val selectionKind = read()
+			when (selectionKind) {
+				"any" -> Unit
+				"exactmatch" -> Unit
+				"largest" -> Unit
+				"noduplicates" -> Unit
+				"samesize" -> Unit
+			}
+			return Decl.COMDAT(id, selectionKind)
 		}
 		else -> invalidOp("$key")
 	}
@@ -278,9 +340,11 @@ fun TokenReader<String>.readDefinitions(): Body {
 interface Type {
 	interface Basic : Type
 	object VOID : Basic
+	object VARARG : Basic
 	data class INT(val width: Int) : Basic
 	data class PTR(val type: Type) : Type
 	data class ARRAY(val type: Type, val count: Int) : Type
+	data class FUNCTION(val rettype: Type, val args: ArrayList<Type>) : Type
 	companion object {
 		val INT8 = INT(8)
 		val INT16 = INT(16)
@@ -293,10 +357,19 @@ fun Type.toJavaType(): String {
 	return when (this) {
 		is Type.INT -> {
 			when (this.width) {
+				1 -> "Z"
+				8 -> "B"
+				16 -> "S"
 				32 -> "I"
+				64 -> "J"
 				else -> noImpl("Int width: $width")
 			}
 		}
+		//is Type.ARRAY -> "[" + this.type.toJavaType()
+		is Type.ARRAY -> "I" // Pointer
+		is Type.PTR -> "I" // Pointer
+		//Type.VARARG -> "[Ljava/lang/Object;"
+		Type.VARARG -> "I"
 		else -> noImpl("type: $this")
 	}
 }
@@ -306,18 +379,40 @@ interface Reference : Value {
 	val id: String
 }
 
-data class INT(val value:Int) : Value
-data class I8ARRAY(val value:String) : Value
-data class LOCAL(override val id:String) : Reference
-data class GLOBAL(override val id:String) : Reference
+data class GETELEMENTPTR(val inbounds: Boolean, val type1: Type, val value: TypedValue, val idx1: TypedValue, val idx2: TypedValue) : Value
+
+data class INT(val value: Int) : Value
+data class I8ARRAY(val value: String) : Value {
+	val bytes by lazy {
+		val out = ByteArrayOutputStream()
+		val r = StrReader(value)
+		while (!r.eof) {
+			val ch = r.readch()
+			when (ch) {
+				'\\' -> out.write(r.read(2).toInt(16))
+				else -> out.write(ch.toInt())
+			}
+		}
+		out.toByteArray()
+	}
+}
+data class LOCAL(override val id: String) : Reference
+data class GLOBAL(override val id: String) : Reference
+data class BITCAST(val ref: Reference, val fromType: Type, val toType: Type) : Reference {
+	override val id: String get() = ref.id
+}
 
 class Argument(val type: Type, val name: LOCAL)
 
 class Body(val stms: List<Stm>)
 
 interface Decl {
-	class DECFUN(val type: Type, val name: Reference, val args: List<Argument>, val body: Body) : Decl
-	class DECVAR(val id: String, val value: Value) : Decl
+	open class DECLARE_BASE(val type: Type, val name: Reference, val argTypes: List<Type>) : Decl
+
+	class DECLARE(type: Type, name: Reference, args: List<Type>) : DECLARE_BASE(type, name, args)
+	class DECFUN(type: Type, name: Reference, val args: List<Argument>, val body: Body) : DECLARE_BASE(type, name, args.map { it.type })
+	class DECVAR(val id: String, val type: Type, val value: Value) : Decl
+	class COMDAT(val id: String, val selectionKind: String) : Decl
 	object EMPTY : Decl
 }
 
@@ -333,7 +428,8 @@ interface Stm {
 
 	class STORE(val src: TypedValue, val dst: TypedValue) : Stm
 	class RET(val typedValue: TypedValue) : Stm
-	class CALL(val target:LOCAL, val rettype: Type, val name: Reference, val args: List<TypedValue>) : Stm
+	class CALL(val target: LOCAL, val rettype: Type, val name: Reference, val args: List<TypedValue>) : Stm
+	class LABEL(val name: String) : Stm
 }
 
 fun TokenReader<String>.readDefinition(): Stm {
@@ -379,7 +475,7 @@ fun TokenReader<String>.readDefinition(): Stm {
 					tryReadExtra()
 					return Stm.CALL(target, rettype, name, args)
 				}
-				else -> invalidOp(op)
+				else -> invalidOp("readDefinition: $op")
 			}
 		}
 		"store" -> {
@@ -390,8 +486,25 @@ fun TokenReader<String>.readDefinition(): Stm {
 			return Stm.STORE(src, dst)
 		}
 		"ret" -> return Stm.RET(readTypedValue())
-		else -> invalidOp(kind)
+		else -> {
+			unread()
+			val label = tryReadLabel()
+			if (label != null) {
+				return Stm.LABEL(label)
+			}
+			invalidOp(kind)
+		}
 	}
+}
+
+fun TokenReader<String>.tryReadLabel(): String? {
+	val name = read()
+	if (read() != ":") {
+		unread()
+		unread()
+		return null
+	}
+	return name
 }
 
 fun StrReader.tokenize(): List<String> {
@@ -403,18 +516,21 @@ fun StrReader.tokenize(): List<String> {
 	return out
 }
 
-val ops = setOf(
-	"%", ",", "=", "@", "'", ":", "(", ")", "[", "]", "{", "}", "#",
-	"*", "-", "+"
+val OPS: Set<String> = setOf(
+	"%", ",", "=",
+	"@", "$",
+	"'", ":", "(", ")", "[", "]", "{", "}", "#",
+	"*", "-", "+",
+	"..."
 )
 
 fun StrReader.readToken(): String? {
 	// skip spaces
 	mainloop@while (hasMore) {
 		readWhile { it.isWhitespace() }
-		if (peek(3) in ops) return read(3)
-		if (peek(2) in ops) return read(2)
-		if (peek(1) in ops) return read(1)
+		if (peek(3) in OPS) return read(3)
+		if (peek(2) in OPS) return read(2)
+		if (peek(1) in OPS) return read(1)
 		val ch = peekch()
 		when (ch) {
 			';', '!' -> {

@@ -63,6 +63,10 @@ open class ProgramVisitor {
 			is Stm.STORE -> visit(stm)
 			is Stm.LABEL -> visit(stm)
 			is Stm.GETELEMETPTR -> visit(stm)
+			is Stm.JUMP_IF -> visit(stm)
+			is Stm.JUMP -> visit(stm)
+			is Stm.PHI -> visit(stm)
+			is Stm.TERNARY -> visit(stm)
 			else -> noImpl("Not implemented stm: $stm")
 		}
 	}
@@ -105,5 +109,17 @@ open class ProgramVisitor {
 	}
 
 	open fun visit(stm: Stm.GETELEMETPTR) {
+	}
+
+	open fun visit(stm: Stm.JUMP) {
+	}
+
+	open fun visit(stm: Stm.JUMP_IF) {
+	}
+
+	open fun visit(stm: Stm.PHI) {
+	}
+
+	open fun visit(stm: Stm.TERNARY) {
 	}
 }

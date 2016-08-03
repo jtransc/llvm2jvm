@@ -98,4 +98,7 @@ public class LlvmRuntime {
             e.printStackTrace();
         }
     }
+
+    static public boolean slt(int a, int b) { return (a < b); }
+    static public boolean sgt(int a, int b) { return (a > b); }
 }

@@ -4,6 +4,7 @@ import com.jtransc.io.i32
 import com.jtransc.mem.BytesWrite
 import com.jtransc.text.TokenReader
 import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Opcodes.*
@@ -34,7 +35,7 @@ object ClassGen {
 
 		override fun visit(program: Program) {
 			this.program = program
-			cw = ClassWriter(0)
+			cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
 			cw.visit(
 				50,
 				ACC_PUBLIC + ACC_SUPER,
@@ -50,6 +51,7 @@ object ClassGen {
 			mv.visitVarInsn(ALOAD, 0)
 			mv.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
 			mv.visitInsn(RETURN)
+			mv.visitMaxs(1, 1)
 			mv.visitMaxs(1, 1)
 			mv.visitEnd()
 
@@ -178,31 +180,58 @@ object ClassGen {
 			return this.decls.filterIsInstance<Decl.DECLARE_BASE>().firstOrNull { it.name.id == ref.id } ?: invalidOp("Cannot find function declaration $ref")
 		}
 
-		override fun visit(decl: Decl.DECFUN) {
-			this.function = decl
+		var preserveSP = false
 
-			mv = cw.visitMethod(ACC_STATIC or ACC_PUBLIC, (decl.name as GLOBAL).id, decl.getFunDescriptor(), null, null)
+		fun startFunction(decl: Decl.DECFUN) {
+			this.function = decl
+			// @TODO: This should be unnecessary if there would be a state created per function
+			this.labels.clear()
 			locals.clear()
 			localCount = 0
 			maxStackCount = 10
 
 			for (arg in decl.args) getLocalId(arg.name)
 
-			mv.GETSTATIC(SP)
-			_store(Type.INT32, LocalSP)
+			this.preserveSP = decl.body.stms.any { it is Stm.ALLOCA }
+
+			// Group PHIs
+			for (phi in decl.body.stms.filterIsInstance<Stm.PHI>()) {
+				val phiLocal = if (phi.locals.any { it in locals }) {
+					phi.locals.map { locals[it] }.filterNotNull().first()
+				} else {
+					localCount++
+				}
+				for (local in phi.locals) locals[local] = phiLocal
+			}
+		}
+
+		override fun visit(decl: Decl.DECFUN) {
+			startFunction(decl)
+
+			mv = cw.visitMethod(ACC_STATIC or ACC_PUBLIC, (decl.name as GLOBAL).id, decl.getFunDescriptor(), null, null)
+
+			if (preserveSP) {
+				mv.GETSTATIC(SP)
+				_store(Type.INT32, LocalSP)
+			}
 
 			super.visit(decl)
 
 			mv.visitMaxs(maxStackCount, localCount)
+			//mv.visitMaxs(1, 1)
 			mv.visitEnd()
 		}
 
 		private fun getLocalId(local: LOCAL): Int = locals.getOrPut(local) { localCount++ }
 
+		fun storeToLocal(type: Type, local: LOCAL) {
+			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(local))
+		}
+
 		override fun visit(stm: Stm.ALLOCA) {
 			mv.INT(4)
 			mv.INVOKESTATIC(ALLOCA)
-			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target as LOCAL))
+			storeToLocal(Type.INT32, stm.target)
 		}
 
 		fun Value.getConstantValue(): Any? = when (this) {
@@ -255,11 +284,12 @@ object ClassGen {
 			mv.INVOKESTATIC(SI32)
 		}
 
+		val labels = hashMapOf<String, Label>()
+
+		fun getLabelByName(name: String): Label = labels.getOrPut(name) { Label() }
+
 		override fun visit(stm: Stm.LABEL) {
-			//visit(stm.dst)
-			//visit(stm.src)
-			//mv.visitLabel()
-			//mv.INVOKESTATIC(SI32)
+			mv.visitLabel(getLabelByName(stm.name))
 		}
 
 		override fun visit(stm: Stm.LOAD) {
@@ -271,7 +301,7 @@ object ClassGen {
 					noImpl("Stm.LOAD: ${stm.targetType}")
 				}
 			}
-			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target))
+			storeToLocal(stm.targetType, stm.target)
 		}
 
 		override fun visit(stm: Stm.GETELEMETPTR) {
@@ -283,7 +313,7 @@ object ClassGen {
 				mv.visitInsn(Opcodes.IMUL)
 			}
 			mv.visitInsn(Opcodes.IADD)
-			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target))
+			storeToLocal(Type.INT32, stm.target)
 		}
 
 		override fun visit(stm: Stm.BINOP) {
@@ -294,23 +324,18 @@ object ClassGen {
 				"sub" -> mv.SUB(stm.type)
 				"mul" -> mv.MUL(stm.type)
 				"sdiv" -> mv.DIV(stm.type)
+				"slt" -> mv.SLT(stm.type)
+				"sgt" -> mv.SGT(stm.type)
 				else -> noImpl("Unsupported op ${stm.op}")
 			}
 			_store(stm.type, stm.target)
 		}
 
-		fun _store(type: Type, local: LOCAL) {
-			when (type) {
-				Type.INT32, is Type.PTR -> {
-					mv.visitVarInsn(Opcodes.ISTORE, getLocalId(local))
-				}
-				else -> noImpl("${type}")
-			}
-		}
+		fun _store(type: Type, local: LOCAL) = storeToLocal(type, local)
 
 		fun _load(type: Type, local: LOCAL) {
 			when (type) {
-				Type.INT32, is Type.PTR -> {
+				Type.INT1, Type.INT32, is Type.PTR -> {
 					mv.visitVarInsn(Opcodes.ILOAD, getLocalId(local))
 				}
 				else -> noImpl("${type}")
@@ -370,12 +395,43 @@ object ClassGen {
 
 		override fun visit(stm: Stm.RET) {
 
-			_load(Type.INT32, LocalSP)
-			mv.PUTSTATIC(SP)
+			if (preserveSP) {
+				_load(Type.INT32, LocalSP)
+				mv.PUTSTATIC(SP)
+			}
 
 			//println("ret!")
 			visit(stm.typedValue)
 			mv.vreturn(this.function.type)
+		}
+
+		override fun visit(stm: Stm.JUMP) {
+			mv.visitJumpInsn(Opcodes.GOTO, getLabelByName(stm.branch.id))
+		}
+
+		override fun visit(stm: Stm.JUMP_IF) {
+			visit(stm.cond)
+			mv.visitJumpInsn(Opcodes.IFNE, getLabelByName(stm.branchTrue.id))
+			mv.visitJumpInsn(Opcodes.GOTO, getLabelByName(stm.branchFalse.id))
+		}
+
+		override fun visit(stm: Stm.PHI) {
+			_load(stm.type, stm.locals[0])
+			_store(stm.type, stm.target)
+		}
+
+		override fun visit(stm: Stm.TERNARY) {
+			visit(stm.cond)
+			val flabel = Label()
+			val contlabel = Label()
+			mv.INT(1)
+			mv.visitJumpInsn(Opcodes.IFEQ, flabel)
+			visit(stm.vfalse)
+			mv.visitJumpInsn(Opcodes.GOTO, contlabel)
+			mv.visitLabel(flabel)
+			visit(stm.vtrue)
+			mv.visitLabel(contlabel)
+			_store(stm.vtrue.type, stm.target)
 		}
 	}
 }
@@ -400,6 +456,20 @@ fun MethodVisitor.MUL(type: Type) = when (type) {
 
 fun MethodVisitor.DIV(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.IDIV)
+	else -> noImpl("${type}")
+}
+
+fun MethodVisitor.SLT(type: Type) = when (type) {
+	Type.INT32 -> {
+		this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::slt.name, "(II)Z", false)
+	}
+	else -> noImpl("${type}")
+}
+
+fun MethodVisitor.SGT(type: Type) = when (type) {
+	Type.INT32 -> {
+		this.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::sgt.name, "(II)Z", false)
+	}
 	else -> noImpl("${type}")
 }
 

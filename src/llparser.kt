@@ -56,7 +56,12 @@ fun TokenReader<String>.readType(): Type {
 }
 
 fun TokenReader<String>.readId(): String {
-	return this.read()
+	val v = this.read()
+	if (v == "!") {
+		return "!" + this.read()
+	} else {
+		return v
+	}
 }
 
 fun TokenReader<String>.readInt(): Int {
@@ -254,6 +259,20 @@ fun TokenReader<String>.parseToplevel(): Decl {
 			}
 			return Decl.COMDAT(id, selectionKind)
 		}
+		"!" -> {
+			val id = readId()
+			expect("=")
+			expect("!")
+			expect("{")
+			while (true) {
+				if (read() == "}") {
+					unread()
+					break
+				}
+			}
+			expect("}")
+			return Decl.METADATA(id)
+		}
 		else -> invalidOp("$key")
 	}
 }
@@ -315,9 +334,12 @@ fun TokenReader<String>.readAttribute() {
 }
 
 fun TokenReader<String>.tryReadExtra() {
-	if (tryRead(",")) {
-		expect("align")
-		readId()
+	while (tryRead(",")) {
+		val readed = expect(setOf("align", "!"))
+		if (readed == "!") expect("tbaa")
+		val id = readId()
+		//println("$readed: $id")
+		//println("-")
 	}
 }
 
@@ -356,6 +378,7 @@ interface Type {
 	data class ARRAY(val type: Type, val count: Int) : Type
 	data class FUNCTION(val rettype: Type, val args: ArrayList<Type>) : Type
 	companion object {
+		val INT1 = INT(1)
 		val INT8 = INT(8)
 		val INT16 = INT(16)
 		val INT32 = INT(32)
@@ -379,8 +402,8 @@ fun Type.toJavaType(): String {
 		is Type.ARRAY -> "I" // Pointer
 		is Type.PTR -> "I" // Pointer
 		Type.VARARG -> "[I"
-		//Type.VARARG -> "[Ljava/lang/Object;"
-		//Type.VARARG -> "I"
+	//Type.VARARG -> "[Ljava/lang/Object;"
+	//Type.VARARG -> "I"
 		else -> noImpl("type: $this")
 	}
 }
@@ -438,6 +461,7 @@ interface Decl {
 	class DECFUN(type: Type, name: Reference, val args: List<Argument>, val body: Body) : DECLARE_BASE(type, name, args.map { it.type })
 	class DECVAR(val id: String, val type: Type, val value: Value) : Decl
 	class COMDAT(val id: String, val selectionKind: String) : Decl
+	class METADATA(val id: String) : Decl
 	object EMPTY : Decl
 }
 
@@ -456,11 +480,15 @@ interface Stm {
 	class CALL(val target: LOCAL, val rettype: Type, val name: Reference, val args: List<TypedValue>) : Stm
 	class LABEL(val name: String) : Stm
 	class GETELEMETPTR(val target: LOCAL, val inbounds: Boolean, val type1: Type, val ptr: TypedValue, val offset: TypedValue) : Stm
+	class JUMP_IF(val cond: TypedValue, val branchTrue: Reference, val branchFalse: Reference) : Stm
+	class JUMP(val branch: Reference) : Stm
+	class PHI(val target: LOCAL, val type: Type, val locals: List<LOCAL>) : Stm
+	class TERNARY(val target: LOCAL, val cond: TypedValue, val vtrue: TypedValue, val vfalse: TypedValue) : Stm
 }
 
 fun TokenReader<String>.readDefinition(): Stm {
 	val kind = read()
-	when (kind) {
+	return when (kind) {
 		"%" -> {
 			unread()
 			val target = readReference() as LOCAL
@@ -470,23 +498,55 @@ fun TokenReader<String>.readDefinition(): Stm {
 				"alloca" -> {
 					val type = readType()
 					tryReadExtra()
-					return Stm.ALLOCA(target, type)
+					Stm.ALLOCA(target, type)
 				}
 				"load" -> {
 					val type1 = readType()
 					expect(",")
 					val from = readTypedValue()
 					tryReadExtra()
-					return Stm.LOAD(target, type1, from)
+					Stm.LOAD(target, type1, from)
 				}
-				"add", "sub", "mul", "sdiv" -> {
+				"add", "sub", "mul", "sdiv", "xor" -> {
 					tryRead("nsw")
 					val type = readType()
 					val src = readValue()
 					expect(",")
 					val dst = readValue()
 					tryReadExtra()
-					return Stm.BINOP(target, op, type, src, dst)
+					Stm.BINOP(target, op, type, src, dst)
+				}
+				"icmp" -> {
+					val compOp = read()
+					val type = readType()
+					val src = readValue()
+					expect(",")
+					val dst = readValue()
+					Stm.BINOP(target, compOp, type, src, dst)
+					//eq: equal
+					//ne: not equal
+					//ugt: unsigned greater than
+					//uge: unsigned greater or equal
+					//ult: unsigned less than
+					//ule: unsigned less or equal
+					//sgt: signed greater than
+					//sge: signed greater or equal
+					//slt: signed less than
+					//sle: signed less or equal
+				}
+				"phi" -> {
+					val type = readType()
+					val args = arrayListOf<LOCAL>()
+					while (true) {
+						expect("[")
+						val variable = readReference() as LOCAL
+						expect(",")
+						val label = readReference() as LOCAL
+						expect("]")
+						args += variable
+						if (tryRead(",")) continue else break
+					}
+					Stm.PHI(target, type, args)
 				}
 				"call" -> {
 					val rettype = readType()
@@ -499,7 +559,7 @@ fun TokenReader<String>.readDefinition(): Stm {
 					}
 					expect(")")
 					tryReadExtra()
-					return Stm.CALL(target, rettype, name, args)
+					Stm.CALL(target, rettype, name, args)
 				}
 				"getelementptr" -> {
 					val inbounds = tryRead("inbounds")
@@ -508,7 +568,15 @@ fun TokenReader<String>.readDefinition(): Stm {
 					val ptr = readTypedValue()
 					expect(",")
 					val offset = readTypedValue()
-					return Stm.GETELEMETPTR(target, inbounds, type1, ptr, offset)
+					Stm.GETELEMETPTR(target, inbounds, type1, ptr, offset)
+				}
+				"select" -> { // ternary operator
+					val cond = readTypedValue()
+					expect(",")
+					val vtrue = readTypedValue()
+					expect(",")
+					val vfalse = readTypedValue()
+					Stm.TERNARY(target, cond, vtrue, vfalse)
 				}
 				else -> invalidOp("readDefinition: $op")
 			}
@@ -518,16 +586,40 @@ fun TokenReader<String>.readDefinition(): Stm {
 			expect(",")
 			val dst = readTypedValue()
 			tryReadExtra()
-			return Stm.STORE(src, dst)
+			Stm.STORE(src, dst)
 		}
-		"ret" -> return Stm.RET(readTypedValue())
+		"ret" -> Stm.RET(readTypedValue())
+		"br" -> {
+			//br i1 <cond>, label <iftrue>, label <iffalse>
+			//br label <dest>          ; Unconditional branch
+			val kind2 = read()
+			when (kind2) {
+				"i1" -> {
+					unread()
+					val cond = readTypedValue()
+					expect(",")
+					expect("label")
+					val branchTrue = readReference()
+					expect(",")
+					expect("label")
+					val branchFalse = readReference()
+					Stm.JUMP_IF(cond, branchTrue, branchFalse)
+				}
+				"label" -> {
+					val branch = readReference()
+					Stm.JUMP(branch)
+				}
+				else -> invalidOp("Unsupported $kind2")
+			}
+		}
 		else -> {
 			unread()
 			val label = tryReadLabel()
 			if (label != null) {
-				return Stm.LABEL(label)
+				Stm.LABEL(label)
+			} else {
+				invalidOp("KIND: $kind : " + peek())
 			}
-			invalidOp(kind)
 		}
 	}
 }
@@ -552,8 +644,8 @@ fun StrReader.tokenize(): List<String> {
 }
 
 val OPS: Set<String> = setOf(
-	"%", ",", "=",
-	"@", "$",
+	"@", "$", "!", "%",
+	",", "=",
 	"'", ":", "(", ")", "[", "]", "{", "}", "#",
 	"*", "-", "+",
 	"..."
@@ -568,7 +660,7 @@ fun StrReader.readToken(): String? {
 		if (peek(1) in OPS) return read(1)
 		val ch = peekch()
 		when (ch) {
-			';', '!' -> {
+			';' -> {
 				this.readUntil('\n')
 				continue@mainloop
 			}
@@ -582,7 +674,7 @@ fun StrReader.readToken(): String? {
 				return readWhile { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '_' || it == '.' }!!
 			}
 			'\u0000' -> {
-				readch()
+				//readch()
 				continue@mainloop
 			}
 			else -> {

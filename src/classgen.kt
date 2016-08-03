@@ -1,6 +1,8 @@
 import com.jtransc.error.invalidOp
 import com.jtransc.error.noImpl
+import com.jtransc.io.i32
 import com.jtransc.mem.BytesWrite
+import com.jtransc.text.TokenReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
@@ -62,7 +64,17 @@ object ClassGen {
 			mv.visitMaxs(1, 1)
 			mv.visitEnd()
 
+			mv = cw.visitMethod(ACC_STATIC or ACC_PUBLIC, "main", "([Ljava/lang/String;)V", null, null)
+			mv.visitLdcInsn(getJavaObjectType(program.className))
+			mv.visitMethodInsn(INVOKESTATIC, LlvmRuntime::class.java.name, LlvmRuntime::mainBootstrap.name, "(Ljava/lang/Class;)V", false)
+			mv.visitInsn(RETURN)
+			mv.visitMaxs(1, 1)
+			mv.visitEnd()
 			cw.visitEnd()
+		}
+
+		private fun getJavaObjectType(name: String): org.objectweb.asm.Type {
+			return org.objectweb.asm.Type.getObjectType(name)
 		}
 
 		class GlobalInfo(val basename:String, val id: Int, val address: Int) {
@@ -71,22 +83,31 @@ object ClassGen {
 		}
 
 		var globalId = 0
+		var tempId = 0
 		val GLOBALS = hashMapOf<String, GlobalInfo>()
 
 		class HeapWriter {
 			val data = ByteArrayOutputStream()
 			val fixes = IdentityHashMap<Value, Int>()
 
+			fun writeBytes(value: TypedValue): Int {
+				return writeBytes(value.value) // @TODO: Use this information!
+			}
+
+			val temp = ByteArray(8)
+
 			fun writeBytes(value: Value): Int {
 				val ptr = data.size()
 				fixes[value] = ptr
 				when (value) {
-					is I8ARRAY -> {
-						data.write(value.bytes)
-
+					is I8ARRAY -> data.write(value.bytes)
+					is GETELEMENTPTR -> data.write(ByteArray(4))
+					is INT -> {
+						BytesWrite.writeIntLE(temp, 0, value.value)
+						data.write(temp, 0, 4)
 					}
-					is GETELEMENTPTR -> {
-						data.write(ByteArray(4))
+					is GENERICARRAY -> {
+						for (v in value.values) writeBytes(v)
 					}
 					else -> invalidOp("Don't know how to store $value")
 				}
@@ -184,6 +205,13 @@ object ClassGen {
 			mv.visitVarInsn(Opcodes.ISTORE, getLocalId(stm.target as LOCAL))
 		}
 
+		fun Value.getConstantValue(): Any? = when (this) {
+			is INT -> this.value
+			//else -> invalidOp("unsupported!")
+			else -> null
+		}
+		fun TypedValue.getConstantValue(): Any? = this.value.getConstantValue()
+
 		override fun visit(typedValue: TypedValue) {
 			val value = typedValue.value
 			when (value) {
@@ -193,6 +221,29 @@ object ClassGen {
 				is GETELEMENTPTR -> {
 					// @TODO: indices!
 					visit(value.value)
+					val indxConstant = value.idx2.getConstantValue()
+
+					val type = value.type1
+					val mult = if (type is Type.ARRAY && (type.type.getSizeInBytes() != 1)) {
+						type.type.getSizeInBytes()
+					} else {
+						1
+					}
+
+					if (indxConstant != null) {
+						val add = (indxConstant as Int) * mult
+						if (add != 0) {
+							mv.INT(add)
+							mv.visitInsn(Opcodes.IADD)
+						}
+					} else {
+						visit(value.idx2)
+						if (mult != 1) {
+							mv.INT(mult)
+							mv.visitInsn(Opcodes.IMUL)
+						}
+						mv.visitInsn(Opcodes.IADD)
+					}
 				}
 				else -> noImpl("value: $value")
 			}
@@ -279,15 +330,34 @@ object ClassGen {
 			val func = program.getFun(stm.name)
 			val name = func.name
 			val desc = func.getFunDescriptor()
-			for ((arg, type) in stm.args.zip(func.argTypes)) {
-				visit(arg)
-				//if (arg.type != type) {
-				//	mv.visitTypeInsn(Opcodes.CHECKCAST, type.toJavaType())
-				//}
+
+			val argReader = TokenReader<TypedValue>(stm.args)
+
+			for (type in func.argTypes) {
+				if (type is Type.VARARG) {
+					val available = argReader.size - argReader.position
+					val local = getLocalId(LOCAL("temp_${tempId++}"))
+
+					mv.INT(available)
+					mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_INT)
+					mv.visitVarInsn(Opcodes.ASTORE, local)
+					var n = 0
+					while (argReader.hasMore) {
+						mv.visitVarInsn(Opcodes.ALOAD, local)
+						mv.INT(n++)
+						visit(argReader.read())
+						mv.visitInsn(Opcodes.IASTORE)
+					}
+					mv.visitVarInsn(Opcodes.ALOAD, local)
+					//mv.visitTypeInsn(Opcodes.CHECKCAST, "[Ljava/lang/Object;")
+				} else {
+					visit(argReader.read())
+				}
 			}
+
 			when (name.id) {
 				// builtins!
-				"puts" -> {
+				"puts", "printf" -> {
 					//println("puts: $desc")
 					mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.name, name.id, desc, false)
 				}

@@ -1,3 +1,4 @@
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -43,12 +44,58 @@ public class LlvmRuntime {
     }
 
     static public int puts(int ptr) {
+        System.out.print(getStringz(ptr));
+        return 0;
+    }
+
+    // @TODO: This shouldn't exist! but should fix function calling with other signatures
+    static public int puts(int... ptrs) {
+        System.out.print(getStringz(ptrs[0]));
+        return 0;
+    }
+
+    static public String getStringz(int ptr) {
+        String out = "";
         while (true) {
             char c = (char) li8(ptr);
             if (c == 0) break;
-            System.out.print(c);
+            out += c;
             ptr++;
         }
+        return out;
+    }
+
+    static public int printf(int format, int... ptr) {
+        String fmt = getStringz(format);
+        int argpos = 0;
+        int n = 0;
+        while (n < fmt.length()) {
+            char c =  fmt.charAt(n++);
+            switch (c) {
+                case '%':
+                    int arg = ptr[argpos++];
+                    char c2 =  fmt.charAt(n++);
+                    switch (c2) {
+                        case 'd':
+                            System.out.print(arg);
+                            break;
+                    }
+                    break;
+                default:
+                    System.out.print(c);
+                    break;
+            }
+        }
         return 0;
+    }
+
+    static public void mainBootstrap(Class<?> clazz) {
+        try {
+            Method mainMethod = clazz.getDeclaredMethod("main");
+            Object result = mainMethod.invoke(null);
+            System.exit((int)result);
+        } catch (Throwable e) {
+            e.printStackTrace();
+        }
     }
 }

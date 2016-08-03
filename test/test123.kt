@@ -91,6 +91,27 @@ class Test123 {
 		Assert.assertEquals(Result(0, "LO"), runCppProgram("""
 			char* data = "HELLO";
 			int main() { puts(data + 3); return 0; }
+		""", optimizations = false, debug = false))
+	}
+
+	@Test fun test9() {
+		Assert.assertEquals(Result(777), runCppProgram("""
+			int data[] = {333, 777, 999};
+			int main() { return data[1]; }
+		""", optimizations = false, debug = false))
+	}
+
+	@Test fun test10() {
+		Assert.assertEquals(Result(0, "999,777,333"), runCppProgram("""
+			int data[] = {333, 777, 999};
+			int main() { printf("%d,%d,%d", data[2], data[1], data[0]); return 0; }
+		""", optimizations = false, debug = false))
+	}
+
+	@Test fun test11() {
+		Assert.assertEquals(Result(0, "999,-1,333"), runCppProgram("""
+			int data[] = {333, 777, 999};
+			int main() { data[1] = -1; printf("%d,%d,%d", data[2], data[1], data[0]); return 0; }
 		""", optimizations = false, debug = true))
 	}
 
@@ -125,7 +146,10 @@ class Test123 {
 	private fun compileCppProgram(code: String, optimizations: Boolean): String {
 		val cwd = CwdVfs()
 		cwd["temp.c"] = code
-		cwd.exec("clang", if (optimizations) "-O3" else "-O0", "-S", "-emit-llvm", "temp.c")
+		val result = cwd.exec("clang", if (optimizations) "-O3" else "-O0", "-S", "-emit-llvm", "temp.c")
+		if (!result.success) {
+			throw RuntimeException("CLANG error: " + result.errorString)
+		}
 		return cwd["temp.ll"].readString()
 	}
 }

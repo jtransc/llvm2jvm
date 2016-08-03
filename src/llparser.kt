@@ -105,6 +105,16 @@ fun TokenReader<String>.readValue(): Value {
 				GETELEMENTPTR(inbounds, type, base, idx1, idx2)
 			}
 			"-" -> INT(-this.read().toInt())
+			"[" -> {
+				val args = arrayListOf<TypedValue>()
+				while (true) {
+					if (tryRead("]")) break
+					args += readTypedValue()
+					if (tryRead("]")) break
+					if (tryRead(",")) continue
+				}
+				GENERICARRAY(args)
+			}
 			else -> INT(p.toInt())
 		}
 	}
@@ -368,8 +378,9 @@ fun Type.toJavaType(): String {
 	//is Type.ARRAY -> "[" + this.type.toJavaType()
 		is Type.ARRAY -> "I" // Pointer
 		is Type.PTR -> "I" // Pointer
-	//Type.VARARG -> "[Ljava/lang/Object;"
-		Type.VARARG -> "I"
+		Type.VARARG -> "[I"
+		//Type.VARARG -> "[Ljava/lang/Object;"
+		//Type.VARARG -> "I"
 		else -> noImpl("type: $this")
 	}
 }
@@ -393,6 +404,7 @@ interface Reference : Value {
 
 data class GETELEMENTPTR(val inbounds: Boolean, val type1: Type, val value: TypedValue, val idx1: TypedValue, val idx2: TypedValue) : Value
 
+data class GENERICARRAY(val values: List<TypedValue>) : Value
 data class INT(val value: Int) : Value
 data class I8ARRAY(val value: String) : Value {
 	val bytes by lazy {

@@ -43,7 +43,7 @@ open class ProgramVisitor {
 
 	open fun visit(arg: Argument) {
 		visit(arg.type)
-		visit(arg.name)
+		visit(arg.local)
 	}
 
 	open fun visit(typedValue: TypedValue) {
@@ -63,8 +63,9 @@ open class ProgramVisitor {
 			is Stm.LOAD -> visit(stm)
 			is Stm.RET -> visit(stm)
 			is Stm.STORE -> visit(stm)
+			is Stm.ASSIGN -> visit(stm)
 			is Stm.LABEL -> visit(stm)
-			is Stm.GETELEMETPTR -> visit(stm)
+			//is Stm.GETELEMETPTR -> visit(stm)
 			is Stm.JUMP_IF -> visit(stm)
 			is Stm.JUMP -> visit(stm)
 			is Stm.PHI -> visit(stm)
@@ -109,11 +110,14 @@ open class ProgramVisitor {
 		visit(stm.dst)
 	}
 
+	open fun visit(stm: Stm.ASSIGN) {
+	}
+
 	open fun visit(stm: Stm.LABEL) {
 	}
 
-	open fun visit(stm: Stm.GETELEMETPTR) {
-	}
+	//open fun visit(stm: Stm.GETELEMETPTR) {
+	//}
 
 	open fun visit(stm: Stm.JUMP) {
 	}

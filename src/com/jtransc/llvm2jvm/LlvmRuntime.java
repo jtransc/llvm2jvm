@@ -4,7 +4,7 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
-@SuppressWarnings("WeakerAccess")
+@SuppressWarnings({"WeakerAccess", "unused"})
 public class LlvmRuntime {
     static public ByteBuffer MEM = ByteBuffer.allocateDirect(0x100000).order(ByteOrder.LITTLE_ENDIAN);
     static public int SP = MEM.limit() - 0x10;
@@ -20,6 +20,11 @@ public class LlvmRuntime {
     static public int li32(int offset) {
         //System.out.println("mem[" + offset + "]");
         return MEM.getInt(offset);
+    }
+
+    static public long li64(int offset) {
+        //System.out.println("mem[" + offset + "]");
+        return MEM.getLong(offset);
     }
 
     static public void si32(int offset, int value) {
@@ -114,5 +119,11 @@ public class LlvmRuntime {
             si8(dst + n, li8(src + n));
         }
         //System.out.println("llvm_memcpy_p0i8_p0i8_i64");
+    }
+
+    static public void llvm_va_start(int ptr) {
+    }
+
+    static public void llvm_va_end(int ptr) {
     }
 }

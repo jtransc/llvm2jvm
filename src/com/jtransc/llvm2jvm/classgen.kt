@@ -2,7 +2,6 @@ package com.jtransc.llvm2jvm
 
 import com.jtransc.error.invalidOp
 import com.jtransc.error.noImpl
-import com.jtransc.io.i32
 import com.jtransc.mem.BytesWrite
 import com.jtransc.text.TokenReader
 import org.objectweb.asm.ClassWriter
@@ -11,7 +10,6 @@ import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Opcodes.*
 import java.io.ByteArrayOutputStream
-import java.lang.reflect.Method
 import java.net.URL
 import java.net.URLClassLoader
 import java.util.*
@@ -27,6 +25,7 @@ object ClassGen {
 	private class Impl : ProgramVisitor() {
 		val ALLOCA = MethodRef(LlvmRuntime::class.java.internalName, LlvmRuntime::alloca.internalName, "(I)I")
 		val LI32 = MethodRef(LlvmRuntime::class.java.internalName, LlvmRuntime::li32.internalName, "(I)I")
+		val LI64 = MethodRef(LlvmRuntime::class.java.internalName, LlvmRuntime::li64.internalName, "(J)I")
 		val SI32 = MethodRef(LlvmRuntime::class.java.internalName, LlvmRuntime::si32.internalName, "(II)V")
 		val SP = FieldRef(LlvmRuntime::class.java.internalName, LlvmRuntime::SP.internalName, "I")
 		val LocalSP = LOCAL("%SP")
@@ -39,9 +38,17 @@ object ClassGen {
 		var localCount = 0
 		var maxStackCount = 0
 
+		val structsByName = hashMapOf<String, Type.STRUCT>()
+
 		override fun visit(program: Program) {
 			this.program = program
-			cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
+
+			for (dectype in program.decls.filterIsInstance<Decl.DECTYPE>()) {
+				structsByName[dectype.id] = dectype.type as Type.STRUCT
+			}
+
+			//cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
+			cw = ClassWriter(ClassWriter.COMPUTE_FRAMES)
 			cw.visit(50, ACC_PUBLIC + ACC_SUPER, program.className, null, "java/lang/Object", null)
 
 			//cw.visitSource("Hello.java", null);
@@ -78,7 +85,7 @@ object ClassGen {
 			return org.objectweb.asm.Type.getObjectType(name)
 		}
 
-		class GlobalInfo(val basename:String, val id: Int, val address: Int) {
+		class GlobalInfo(val basename: String, val id: Int, val address: Int) {
 			//val name = "global$id"
 			val name = if (basename.startsWith("\\") || basename.contains('.')) "_global$id" else basename
 		}
@@ -106,6 +113,10 @@ object ClassGen {
 					is INT -> {
 						BytesWrite.writeIntLE(temp, 0, value.value)
 						data.write(temp, 0, 4)
+					}
+					is LONG -> {
+						BytesWrite.writeLongLE(temp, 0, value.value)
+						data.write(temp, 0, 8)
 					}
 					is GENERICARRAY -> {
 						for (v in value.values) writeBytes(v)
@@ -164,10 +175,20 @@ object ClassGen {
 		}
 
 		override fun visit(decl: Decl.DECVAR) {
+			// @TODO: This is not fine! We have to decide whether we are going to store in the STATIC area or in fields
 			val address = heapWriter.writeBytes(decl.value)
 			val info = GlobalInfo(decl.id, globalId++, address)
 			GLOBALS[decl.id] = info
-			createField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL, info.name, "I", address)
+			val type = decl.type
+			val typeStr = when (type) {
+				Type.INT64 -> "J"
+				else -> "I"
+			}
+			val constant: Any = when (type) {
+				Type.INT64 -> address.toLong()
+				else -> address.toInt()
+			}
+			createField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL, info.name, typeStr, constant)
 		}
 
 		// @TODO: Cache descriptor!
@@ -183,6 +204,8 @@ object ClassGen {
 		}
 
 		var preserveSP = false
+		var phiValues = hashMapOf<Pair<String, String>, TypedValue>()
+		var currentLabel = "-"
 
 		fun startFunction(decl: Decl.DECFUN) {
 			this.function = decl
@@ -191,19 +214,26 @@ object ClassGen {
 			locals.clear()
 			localCount = 0
 			maxStackCount = 10
+			this.currentLabel = "-"
+			phiValues.clear()
 
-			for (arg in decl.args) getLocalId(arg.type, arg.name)
+			for (arg in decl.args) getLocalId(arg.type, arg.local)
 
 			this.preserveSP = decl.body.stms.any { it is Stm.ALLOCA }
 
-			// Group PHIs
-			for (phi in decl.body.stms.filterIsInstance<Stm.PHI>()) {
-				val phiLocal = if (phi.locals.any { it in locals }) {
-					phi.locals.map { locals[it] }.filterNotNull().first()
-				} else {
-					getLocalId(phi.type, phi.locals[0])
+			// Get PHIs stuff
+			var currentLabel = "-"
+			for (stm in decl.body.stms) {
+				when (stm) {
+					is Stm.LABEL -> {
+						currentLabel = stm.name
+					}
+					is Stm.PHI -> {
+						for ((fromLabel, value) in stm.labelsToValues) {
+							phiValues[Pair(fromLabel, currentLabel)] = value
+						}
+					}
 				}
-				for (local in phi.locals) locals[local] = phiLocal
 			}
 		}
 
@@ -223,7 +253,12 @@ object ClassGen {
 
 			super.visit(decl)
 
-			mv.visitMaxs(maxStackCount, localCount)
+			try {
+				mv.visitMaxs(maxStackCount, localCount)
+			} catch (e: ArrayIndexOutOfBoundsException) {
+				println("Error calculating maxs for function: ${function.name}")
+				e.printStackTrace()
+			}
 			//mv.visitMaxs(1, 1)
 			mv.visitEnd()
 		}
@@ -252,14 +287,26 @@ object ClassGen {
 
 		fun Value.getConstantValue(): Any? = when (this) {
 			is INT -> this.value
-			//else -> invalidOp("unsupported!")
+		//else -> invalidOp("unsupported!")
 			else -> null
 		}
+
 		fun TypedValue.getConstantValue(): Any? = this.value.getConstantValue()
+
+		fun Type.getResolvedType(): Type {
+			if (this is Type.STRUCT_REF) {
+				return structsByName[this.name] ?: invalidOp("Can't find struct with name: $this")
+			} else {
+				return this
+			}
+		}
+
+		fun Type.getSizeInBytesFixed(): Int = this.getResolvedType().getSizeInBytes()
 
 		override fun visit(typedValue: TypedValue) {
 			val value = typedValue.value
 			when (value) {
+				NULL -> mv.INT(0)
 				is INT -> mv.INT(value.value)
 				is LONG -> mv.LONG(value.value)
 				is BOOL -> mv.INT(if (value.value) 1 else 0)
@@ -268,24 +315,38 @@ object ClassGen {
 				is GETELEMENTPTR -> {
 					// @TODO: indices!
 					visit(value.value)
-					val indxConstant = value.idx2.getConstantValue()
+					val idx2 = value.offsets.last()
+					val indxConstant = idx2.getConstantValue()
 
-					val type = value.type1
-					val mult = if (type is Type.ARRAY && (type.type.getSizeInBytes() != 1)) {
-						type.type.getSizeInBytes()
+					val type = value.type1.getResolvedType()
+
+					val offset = if (type is Type.STRUCT) {
+						type.getOffsetInBytes(indxConstant as Int)
+					} else {
+						0
+					}
+
+					val mult = if (type is Type.ARRAY && (type.type.getSizeInBytesFixed() != 1)) {
+						type.type.getSizeInBytesFixed()
 					} else {
 						1
 					}
 
-					if (indxConstant != null) {
+					if (offset != 0) {
+						val add = offset
+						if (add != 0) {
+							mv.INT(add)
+							mv.visitInsn(Opcodes.IADD)
+						}
+					} else if (indxConstant != null) {
 						val add = (indxConstant as Int) * mult
 						if (add != 0) {
 							mv.INT(add)
 							mv.visitInsn(Opcodes.IADD)
 						}
 					} else {
-						visit(value.idx2)
-						conv(value.idx2.type, Type.INT32)
+						visit(idx2)
+						conv(idx2.type, Type.INT32)
 						if (mult != 1) {
 							mv.INT(mult)
 							mv.visitInsn(Opcodes.IMUL)
@@ -307,19 +368,25 @@ object ClassGen {
 			mv.INVOKESTATIC(SI32)
 		}
 
+		override fun visit(stm: Stm.ASSIGN) {
+			visit(stm.src)
+			storeToLocal(stm.src.type, stm.target)
+		}
+
 		val labels = hashMapOf<String, Label>()
 
 		fun getLabelByName(name: String): Label = labels.getOrPut(name) { Label() }
 
 		override fun visit(stm: Stm.LABEL) {
+			currentLabel = stm.name
 			mv.visitLabel(getLabelByName(stm.name))
 		}
 
 		override fun visit(stm: Stm.LOAD) {
 			visit(stm.from)
 			when (stm.targetType) {
-				Type.INT32 -> mv.INVOKESTATIC(LI32)
-				is Type.PTR -> mv.INVOKESTATIC(LI32)
+				Type.INT32, is Type.PTR -> mv.INVOKESTATIC(LI32)
+				Type.INT64 -> mv.INVOKESTATIC(LI64)
 				else -> {
 					noImpl("com.jtransc.llvm2jvm.Stm.LOAD: ${stm.targetType}")
 				}
@@ -327,31 +394,18 @@ object ClassGen {
 			storeToLocal(stm.targetType, stm.target)
 		}
 
-		override fun visit(stm: Stm.GETELEMETPTR) {
-			val elementSize = stm.type1.getSizeInBytes()
-			val offset = stm.offsets.last()
-			visit(stm.ptr)
-			visit(offset)
-			conv(offset.type, Type.INT32)
-			if (elementSize != 1) {
-				mv.INT(stm.type1.getSizeInBytes())
-				mv.visitInsn(Opcodes.IMUL)
-			}
-			mv.visitInsn(Opcodes.IADD)
-			storeToLocal(Type.INT32, stm.target)
-		}
-
 		override fun visit(stm: Stm.BINOP) {
 			visit(stm.typedLeft)
 			visit(stm.typedRight)
 			when (stm.op) {
+				"or" -> mv.OR(stm.type)
 				"add" -> mv.ADD(stm.type)
 				"sub" -> mv.SUB(stm.type)
 				"mul" -> mv.MUL(stm.type)
 				"sdiv" -> mv.DIV(stm.type)
 				"slt" -> mv.SLT(stm.type)
 				"sgt" -> mv.SGT(stm.type)
-				"ult" -> mv.SLT(stm.type)
+				"ult" -> mv.ULT(stm.type)
 				else -> noImpl("Unsupported op ${stm.op}")
 			}
 			_store(stm.type, stm.target)
@@ -405,12 +459,21 @@ object ClassGen {
 					mv.visitVarInsn(Opcodes.ALOAD, local)
 					//mv.visitTypeInsn(Opcodes.CHECKCAST, "[Ljava/lang/Object;")
 				} else {
-					visit(argReader.read())
+					val arg = argReader.read()
+					visit(arg)
+					conv(arg.type, type)
 				}
 			}
 
+			// Intrinsics
 			if (name.id.startsWith("llvm.")) {
 				when (name.id) {
+					"llvm.va_start" -> {
+						mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::llvm_va_start.internalName, desc, false)
+					}
+					"llvm.va_end" -> {
+						mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::llvm_va_end.internalName, desc, false)
+					}
 					"llvm.memcpy.p0i8.p0i8.i64" -> {
 						mv.visitMethodInsn(Opcodes.INVOKESTATIC, LlvmRuntime::class.java.internalName, LlvmRuntime::llvm_memcpy_p0i8_p0i8_i64.internalName, desc, false)
 					}
@@ -433,7 +496,6 @@ object ClassGen {
 		}
 
 		override fun visit(stm: Stm.RET) {
-
 			if (preserveSP) {
 				_load(Type.INT32, LocalSP)
 				mv.PUTSTATIC(SP)
@@ -445,17 +507,33 @@ object ClassGen {
 		}
 
 		override fun visit(stm: Stm.JUMP) {
+			val value = this.phiValues[Pair(currentLabel, stm.branch.id)]
+			if (value != null) visit(value)
 			mv.visitJumpInsn(Opcodes.GOTO, getLabelByName(stm.branch.id))
 		}
 
 		override fun visit(stm: Stm.JUMP_IF) {
+			// TRUE
+			val valueTrue = this.phiValues[Pair(currentLabel, stm.branchTrue.id)]
+			if (valueTrue != null) visit(valueTrue)
 			visit(stm.cond)
 			mv.visitJumpInsn(Opcodes.IFNE, getLabelByName(stm.branchTrue.id))
+			if (valueTrue != null) pop(valueTrue.type)
+
+			// FALSE
+			val valueFalse = this.phiValues[Pair(currentLabel, stm.branchFalse.id)]
+			if (valueFalse != null) visit(valueFalse)
 			mv.visitJumpInsn(Opcodes.GOTO, getLabelByName(stm.branchFalse.id))
 		}
 
+		private fun pop(type: Type) {
+			mv.visitInsn(if (type.isLongOrDouble()) Opcodes.POP else Opcodes.POP2)
+		}
+
 		override fun visit(stm: Stm.PHI) {
-			_load(stm.type, stm.locals[0])
+			//_load(stm.type, stm.labelsToValues[0])
+
+			// Value is in the stack!
 			_store(stm.type, stm.target)
 		}
 
@@ -510,26 +588,36 @@ object ClassGen {
 	}
 }
 
-class MethodRef(val owner: String, val name:String, val desc:String)
-class FieldRef(val owner: String, val name:String, val desc:String)
+class MethodRef(val owner: String, val name: String, val desc: String)
+class FieldRef(val owner: String, val name: String, val desc: String)
 
 fun MethodVisitor.ADD(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.IADD)
+	Type.INT64 -> this.visitInsn(Opcodes.LADD)
+	else -> noImpl("$type")
+}
+
+fun MethodVisitor.OR(type: Type) = when (type) {
+	Type.INT32 -> this.visitInsn(Opcodes.IOR)
+	Type.INT64 -> this.visitInsn(Opcodes.LOR)
 	else -> noImpl("$type")
 }
 
 fun MethodVisitor.SUB(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.ISUB)
+	Type.INT64 -> this.visitInsn(Opcodes.LSUB)
 	else -> noImpl("$type")
 }
 
 fun MethodVisitor.MUL(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.IMUL)
+	Type.INT64 -> this.visitInsn(Opcodes.LMUL)
 	else -> noImpl("$type")
 }
 
 fun MethodVisitor.DIV(type: Type) = when (type) {
 	Type.INT32 -> this.visitInsn(Opcodes.IDIV)
+	Type.INT64 -> this.visitInsn(Opcodes.LDIV)
 	else -> noImpl("$type")
 }
 
@@ -551,11 +639,11 @@ fun MethodVisitor.SGT(type: Type) = when (type) {
 	else -> noImpl("$type")
 }
 
-inline fun <reified T: Any> MethodVisitor.NEWARRAY() {
+inline fun <reified T : Any> MethodVisitor.NEWARRAY() {
 	NEWARRAY(T::class.java)
 }
 
-private fun MethodVisitor._FIELD(opcode:Int, field: FieldRef) {
+private fun MethodVisitor._FIELD(opcode: Int, field: FieldRef) {
 	visitFieldInsn(opcode, field.owner, field.name, field.desc)
 }
 
@@ -582,8 +670,8 @@ fun MethodVisitor.INT(value: Int) {
 		3 -> visitInsn(ICONST_3)
 		4 -> visitInsn(ICONST_4)
 		5 -> visitInsn(ICONST_5)
-		in Byte.MIN_VALUE .. Byte.MAX_VALUE -> visitIntInsn(Opcodes.BIPUSH, value)
-		in Short.MIN_VALUE .. Short.MAX_VALUE -> visitIntInsn(Opcodes.SIPUSH, value)
+		in Byte.MIN_VALUE..Byte.MAX_VALUE -> visitIntInsn(Opcodes.BIPUSH, value)
+		in Short.MIN_VALUE..Short.MAX_VALUE -> visitIntInsn(Opcodes.SIPUSH, value)
 		else -> {
 			visitLdcInsn(value)
 		}
@@ -592,7 +680,7 @@ fun MethodVisitor.INT(value: Int) {
 
 fun MethodVisitor.LONG(value: Long) {
 	when (value) {
-		in Int.MIN_VALUE .. Int.MAX_VALUE -> {
+		in Int.MIN_VALUE..Int.MAX_VALUE -> {
 			this.INT(value.toInt())
 			visitInsn(Opcodes.I2L)
 		}
@@ -602,7 +690,7 @@ fun MethodVisitor.LONG(value: Long) {
 	}
 }
 
-inline fun <reified T: Any> MethodVisitor.RETURN() = this.vreturn(T::class.java)
+inline fun <reified T : Any> MethodVisitor.RETURN() = this.vreturn(T::class.java)
 
 fun MethodVisitor.vreturn(clazz: Class<*>) = clazz.toType()
 
@@ -615,8 +703,9 @@ fun Class<*>.toType() = when (this) {
 fun MethodVisitor.vreturn(type: Type) {
 	when (type) {
 		Type.VOID -> visitInsn(RETURN)
-		Type.INT32 -> visitInsn(IRETURN)
-		else ->visitInsn(ARETURN)
+		Type.INT32, is Type.PTR -> visitInsn(IRETURN)
+		Type.INT64 -> visitInsn(LRETURN)
+		else -> invalidOp("Unsupported return $type")
 	}
 }
 

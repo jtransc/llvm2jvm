@@ -10,7 +10,7 @@ import org.junit.Assert
 import org.junit.Test
 import java.io.File
 
-class Test123 {
+class GenTests {
 	@Test fun test1() {
 		// clang -S -emit-llvm a.c
 		val ll = """
@@ -139,12 +139,35 @@ class Test123 {
 		""", optimizations = true, debug = true))
 	}
 
-	@Test fun test14() {
+	@Test fun test14a() {
+		Assert.assertEquals(Result(36), runCppProgram("""
+			int main() {
+				int a = 0, b = 0;
+				do {
+					b += a;
+					a++;
+				} while (a < 9);
+
+				return b;
+			}
+		""", optimizations = false, debug = true))
+	}
+
+	@Test fun test14b() {
 		Assert.assertEquals(Result(140), runCppProgram("""
 			int data[] = {4,5,6,7,9,10,22,33,44};
 			int main() {
 				int sum = 0;
-				for (int n = 0; n < (sizeof(data) / sizeof(data[0])); n++) sum += data[n];
+				//for (int n = 0; n < (sizeof(data) / sizeof(data[0])); n++) sum += data[n];
+
+				{
+					int n = 0;
+					while (n < (sizeof(data) / sizeof(data[0]))) {
+						sum += data[n];
+						n++;
+					}
+				}
+
 				return sum;
 			}
 		""", optimizations = false, debug = true))
@@ -162,7 +185,19 @@ class Test123 {
 		""", optimizations = false, debug = true))
 	}
 
-	@Test fun test16() {
+	@Test fun test15b() {
+		Assert.assertEquals(Result(27), runCppProgram("""
+			typedef int Test2;
+			typedef struct { int a, b; } Test;
+			int main() {
+				Test t[] = {{1, 2}, {7, -1}};
+				Test2 t2 = 3;
+				return ((t[0].a + t[0].b) * (t[1].a - t[1].b)) + t2;
+			}
+		""", optimizations = false, debug = true))
+	}
+
+	@Test fun test16a() {
 		Assert.assertEquals(Result(140), runCppProgram("""
 			#include <stdio.h>
 			int main() {
@@ -170,6 +205,16 @@ class Test123 {
 				return 0;
 			}
 		""", optimizations = false, debug = true))
+	}
+
+	@Test fun test16b() {
+		Assert.assertEquals(Result(0, "Hello world!"), runCppProgram("""
+			#include <stdio.h>
+			int main() {
+				puts("Hello world!");
+				return 0;
+			}
+		""", optimizations = true, debug = true))
 	}
 
 

@@ -55,7 +55,7 @@ fun Stm.dump() {
 	}
 }
 
-fun Argument.dump(): String = "${this.type.dump()} ${this.name.dump()}"
+fun Argument.dump(): String = "${this.type.dump()} ${this.local.dump()}"
 
 fun Type.dump(): String = when (this) {
 	is Type.INT -> "i${this.width}"

@@ -19,7 +19,12 @@ class Program(val className: String, val decls: List<Decl>) {
 fun TokenReader<String>.parse(className: String) = Program(className, parseToplevelList())
 
 fun TokenReader<String>.readArgument(): Argument {
-	return Argument(readType(), readReference() as LOCAL)
+	val type = readType()
+	if (type == Type.VARARG) {
+		return Argument(type, LOCAL("..."))
+	} else {
+		return Argument(type, readReference() as LOCAL)
+	}
 }
 
 fun TokenReader<String>.readBasicType(): Type.Basic {
@@ -27,7 +32,6 @@ fun TokenReader<String>.readBasicType(): Type.Basic {
 	return when (type) {
 		"..." -> Type.VARARG
 		"void" -> Type.VOID
-		"opaque" -> Type.OPAQUE
 		else -> if (type.startsWith("i")) {
 			Type.INT(type.substring(1).toInt())
 		} else {
@@ -62,7 +66,11 @@ fun TokenReader<String>.readType(): Type {
 		// struct reference!
 		"%" -> {
 			expect("%")
-			Type.REF(read())
+			Type.STRUCT_REF(read())
+		}
+		"opaque" -> {
+			expect("opaque")
+			Type.OPAQUE
 		}
 		else -> readBasicType()
 	}
@@ -94,6 +102,11 @@ fun TokenReader<String>.readId(): String {
 fun TokenReader<String>.readInt(): Int {
 	val vs = this.read()
 	return vs.toInt()
+}
+
+fun TokenReader<String>.readLabel(): LABEL_NAME {
+	expect("%")
+	return LABEL_NAME(read())
 }
 
 fun TokenReader<String>.readReference(): Reference {
@@ -129,12 +142,12 @@ fun TokenReader<String>.readValue(type: Type): Value {
 				val type = readType()
 				expect(",")
 				val base = readTypedValue()
-				expect(",")
-				val idx1 = readTypedValue()
-				expect(",")
-				val idx2 = readTypedValue()
+				val indices = arrayListOf<TypedValue>()
+				while (tryRead(",")) {
+					indices += readTypedValue()
+				}
 				expect(")")
-				GETELEMENTPTR(inbounds, type, base, idx1, idx2)
+				GETELEMENTPTR(inbounds, type, base, indices)
 			}
 			"-" -> INT(-this.read().toInt())
 			"[" -> {
@@ -171,6 +184,7 @@ fun TokenReader<String>.readValue(type: Type): Value {
 			}
 			"true" -> BOOL(true)
 			"false" -> BOOL(false)
+			"null" -> NULL
 			else -> {
 				if (type == Type.INT64) {
 					LONG(p.toLong())
@@ -242,12 +256,15 @@ fun TokenReader<String>.parseToplevel(): Decl {
 			val args = arrayListOf<Argument>()
 			expect("(")
 			while (peek() != ")") {
+				if (peek() == ")") break
 				args += readArgument()
 				if (tryRead(",")) continue
 				if (peek() == ")") break
+				invalidOp("expected , or )")
 			}
 			expect(")")
 			readAttributes()
+			tryRead("comdat")
 			expect("{")
 			val body = readDefinitions()
 			expect("}")
@@ -442,14 +459,13 @@ fun TokenReader<String>.readDefinitions(): Body {
 interface Type {
 	interface Basic : Type
 	object VOID : Basic
-	object OPAQUE : Basic
 	object VARARG : Basic
 	data class INT(val width: Int) : Basic
 	data class FLOAT(val width: Int) : Basic
 	data class PTR(val type: Type) : Type
 	data class ARRAY(val type: Type, val count: Int) : Type
 	data class STRUCT(val types: List<Type>) : Type
-	data class REF(val name: String) : Type
+	data class STRUCT_REF(val name: String) : Type
 	data class FUNCTION(val rettype: Type, val args: ArrayList<Type>) : Type
 	companion object {
 		val INT1 = INT(1)
@@ -459,6 +475,9 @@ interface Type {
 		val INT64 = INT(64)
 		val FLOAT32 = FLOAT(32)
 		val FLOAT64 = FLOAT(64)
+
+		val PTR_INT = INT32
+		val OPAQUE: Type = STRUCT(listOf())
 	}
 }
 
@@ -481,7 +500,7 @@ fun Type.toJavaType(): String {
 		is Type.ARRAY -> "I" // Pointer
 		is Type.PTR -> "I" // Pointer
 		is Type.STRUCT -> "I" // Pointer
-		is Type.REF -> "I" // Pointer
+		is Type.STRUCT_REF -> "I" // Pointer
 		Type.VARARG -> "[I"
 	//com.jtransc.llvm2jvm.Type.VARARG -> "[Ljava/lang/Object;"
 	//com.jtransc.llvm2jvm.Type.VARARG -> "I"
@@ -494,24 +513,33 @@ fun Type.getSizeInBits(): Int {
 		is Type.INT -> this.width
 		is Type.ARRAY -> this.count * this.type.getSizeInBytes()
 		is Type.PTR -> 32
-		is Type.REF -> 32 // @TODO: This is wrong!
 		Type.VARARG -> 32
+		is Type.STRUCT -> this.types.sumBy { it.getSizeInBits() }
+		is Type.STRUCT_REF -> invalidOp("Cannot get size of a struct_ref")
+		else -> noImpl("type: $this")
+	}
+}
+
+fun Type.getOffsetInBits(offset: Int): Int {
+	return when (this) {
+		is Type.STRUCT -> this.types.take(offset).sumBy { it.getSizeInBits() }
 		else -> noImpl("type: $this")
 	}
 }
 
 fun Type.getSizeInBytes(): Int = getSizeInBits() / 8
+fun Type.getOffsetInBytes(offset: Int): Int = getOffsetInBits(offset) / 8
 
 interface Value
 interface Reference : Value {
 	val id: String
 }
 
-data class GETELEMENTPTR(val inbounds: Boolean, val type1: Type, val value: TypedValue, val idx1: TypedValue, val idx2: TypedValue) : Value
-
+data class GETELEMENTPTR(val inbounds: Boolean, val type1: Type, val value: TypedValue, val offsets: List<TypedValue>) : Value
 data class GENERICSTRUCT(val values: List<TypedValue>) : Value
 data class GENERICARRAY(val values: List<TypedValue>) : Value
 data class BOOL(val value: Boolean) : Value
+object NULL : Value
 data class INT(val value: Int) : Value
 data class LONG(val value: Long) : Value
 data class I8ARRAY(val value: String) : Value {
@@ -529,16 +557,16 @@ data class I8ARRAY(val value: String) : Value {
 	}
 }
 
+data class LABEL_NAME(val id: String)
 data class LOCAL(override val id: String) : Reference
 data class GLOBAL(override val id: String) : Reference
-
 
 //data class BITCAST(val fromValue: TypedValue, val toType: Type) : Reference
 data class BITCAST(val ref: Reference, val fromType: Type, val toType: Type) : Reference {
 	override val id: String get() = ref.id
 }
 
-class Argument(val type: Type, val name: LOCAL)
+class Argument(val type: Type, val local: LOCAL)
 
 class Body(val stms: List<Stm>)
 
@@ -563,16 +591,28 @@ interface Stm {
 	class BINOP(val target: LOCAL, val op: String, val type: Type, val left: Value, val right: Value) : Stm {
 		val typedLeft = TypedValue(type, left)
 		val typedRight = TypedValue(type, right)
+
+		//eq: equal
+		//ne: not equal
+		//ugt: unsigned greater than
+		//uge: unsigned greater or equal
+		//ult: unsigned less than
+		//ule: unsigned less or equal
+		//sgt: signed greater than
+		//sge: signed greater or equal
+		//slt: signed less than
+		//sle: signed less or equal
 	}
 
+	class ASSIGN(val target: LOCAL, val src: TypedValue) : Stm
 	class STORE(val src: TypedValue, val dst: TypedValue) : Stm
 	class RET(val typedValue: TypedValue) : Stm
 	class CALL(val target: LOCAL?, val rettype: Type, val name: Reference, val args: List<TypedValue>) : Stm
 	class LABEL(val name: String) : Stm
-	class GETELEMETPTR(val target: LOCAL, val inbounds: Boolean, val type1: Type, val ptr: TypedValue, val offsets: List<TypedValue>) : Stm
+	//class GETELEMETPTR(val target: LOCAL, val inbounds: Boolean, val type1: Type, val ptr: TypedValue, val offsets: List<TypedValue>) : Stm
 	class JUMP_IF(val cond: TypedValue, val branchTrue: Reference, val branchFalse: Reference) : Stm
 	class JUMP(val branch: Reference) : Stm
-	class PHI(val target: LOCAL, val type: Type, val locals: List<LOCAL>) : Stm
+	class PHI(val target: LOCAL, val type: Type, val labelsToValues: Map<String, TypedValue>) : Stm
 	class TERNARY(val target: LOCAL, val cond: TypedValue, val vtrue: TypedValue, val vfalse: TypedValue) : Stm
 	class SEXT(val target: LOCAL, val from: TypedValue, val toType: Type) : Stm
 	class BITCAST(val target: LOCAL, val from: TypedValue, val toType: Type) : Stm
@@ -613,7 +653,7 @@ fun TokenReader<String>.readDefinition(): Stm {
 					tryReadExtra()
 					Stm.LOAD(target, type1, from)
 				}
-				"add", "sub", "mul", "sdiv", "xor" -> {
+				"add", "sub", "mul", "sdiv", "xor", "or" -> {
 					tryRead("nsw")
 					val type = readType()
 					val src = readValue(type)
@@ -629,32 +669,24 @@ fun TokenReader<String>.readDefinition(): Stm {
 					expect(",")
 					val dst = readValue(type)
 					Stm.BINOP(target, compOp, type, src, dst)
-					//eq: equal
-					//ne: not equal
-					//ugt: unsigned greater than
-					//uge: unsigned greater or equal
-					//ult: unsigned less than
-					//ule: unsigned less or equal
-					//sgt: signed greater than
-					//sge: signed greater or equal
-					//slt: signed less than
-					//sle: signed less or equal
+
 				}
 				"phi" -> {
 					val type = readType()
-					val args = arrayListOf<LOCAL>()
+					val args = hashMapOf<String, TypedValue>()
 					while (true) {
 						expect("[")
-						val variable = readReference() as LOCAL
+						val value = TypedValue(type, readValue(type))
 						expect(",")
-						val label = readReference() as LOCAL
+						val label = readLabel().id
 						expect("]")
-						args += variable
+						args[label] = value
 						if (tryRead(",")) continue else break
 					}
 					Stm.PHI(target, type, args)
 				}
-				"call" -> {
+				"tail", "call" -> {
+					if (op == "tail") expect("call")
 					readCall(target)
 				}
 				"getelementptr" -> {
@@ -666,7 +698,9 @@ fun TokenReader<String>.readDefinition(): Stm {
 					while (tryRead(",")) {
 						offsets += readTypedValue()
 					}
-					Stm.GETELEMETPTR(target, inbounds, type1, ptr, offsets)
+					//Stm.GETELEMETPTR(target, inbounds, type1, ptr, offsets)
+					//Stm.ASSIGN(target, TypedValue(type1, GETELEMENTPTR(inbounds, type1, ptr, offsets)))
+					Stm.ASSIGN(target, TypedValue(Type.PTR_INT, GETELEMENTPTR(inbounds, type1, ptr, offsets)))
 				}
 				"select" -> { // ternary operator
 					val cond = readTypedValue()
